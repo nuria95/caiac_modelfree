@@ -363,7 +363,7 @@ if __name__ == '__main__':
     ys = torch.concatenate([torch.sin(xs), torch.cos(xs)], dim=1)
     ys = ys + noise_level * torch.randn(size=ys.shape)
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
-    model = MultiHeadGaussianEnsemble(input_dim=1, output_dict={'y': ys}, features=(256, 256),
+    model = EnsembleMLP(input_dim=1, output_dict={'y': ys}, features=(256, 256),
                                       optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
                                       learn_std=learn_std)
 
