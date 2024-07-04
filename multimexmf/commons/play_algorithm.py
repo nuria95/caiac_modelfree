@@ -1,4 +1,4 @@
-import torch
+from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from typing import Union, Type, TypeVar
@@ -7,7 +7,6 @@ import torch as th
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 from stable_baselines3.common.utils import obs_as_tensor
 import numpy as np
-import copy
 from multimexmf.models.pretrain_models import EnsembleMLP
 
 SelfPlayAlgorithm = TypeVar("SelfPlayAlgorithm", bound="PlayAlgorithm")
@@ -26,14 +25,22 @@ class BasePlayAlgorithm(ABC):
                  intrinsic_reward_gradient_steps: int = 1000,
                  intrinsic_reward_batch_size: int = 64,
                  ):
+        # base algorithm processes env
         self.base_algorithm = base_algorithm_cls(env=env, **base_algorithm_kwargs)
-        # TODO: See if I shuld copy the env or not
-        self.exploitation_algorithm = exploitation_algorithm_cls(env=env,
+        # Processed env is passed to the exploitation algorithm. Both envs refer to the same object
+        self.exploitation_algorithm = exploitation_algorithm_cls(env=self.base_algorithm.env,
                                                                  **exploitation_algorithm_kwargs)
         self._setup_model(disagreement_model_kwargs)
         self.exploitation_learning_starts = exploitation_learning_starts
         self.intrinsic_reward_gradient_steps = intrinsic_reward_gradient_steps
         self.intrinsic_reward_batch_size = intrinsic_reward_batch_size
+
+    @staticmethod
+    def align_agents(current_agent: BaseAlgorithm, target_agent: BaseAlgorithm):
+        # done to align model internal states
+        target_agent._last_obs = current_agent._last_obs
+        target_agent._last_original_obs = current_agent._last_original_obs
+        target_agent._last_episode_starts = current_agent._last_episode_starts
 
     def _setup_model(self, disagreement_model_kwargs) -> None:
         obs_dim, act_dim = self.base_algorithm.observation_space.shape[0], self.base_algorithm.action_space.shape[0]
@@ -180,6 +187,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
 
             # Store data in replay buffer (normalized action and unnormalized observation)
             # store true reward in the buffer
+            # automatically updates the internal state of the algorithm: last_obs =  next_obs
             self.exploitation_algorithm._store_transition(replay_buffer, buffer_action, new_obs, rewards, dones,
                                                           infos)  # type: ignore[arg-type]
 
@@ -211,7 +219,6 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                             0]  # type: ignore[arg-type]
                     intrinsic_rewards[idx] += self.base_algorithm.gamma * terminal_value
                     # rewards[idx] += self.base_algorithm.gamma * terminal_value
-
             rollout_buffer.add(
                 self.base_algorithm._last_obs,  # type: ignore[arg-type]
                 actions,
@@ -220,6 +227,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                 values,
                 log_probs,
             )
+            # update base algorithm internal state
             self.base_algorithm._last_obs = new_obs  # type: ignore[assignment]
             self.base_algorithm._last_episode_starts = dones
 
@@ -297,13 +305,8 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
     ):
         iteration = 0
         initial_exploitation_callback = exploitation_callback
-        total_exploration_timesteps, base_callback = self.base_algorithm._setup_learn(
-            total_exploration_timesteps,
-            base_callback,
-            reset_num_timesteps,
-            tb_log_name,
-            progress_bar,
-        )
+        # update callbacks for base and exploration algorithms. Setup learn, resets the environments and thus,
+        # updates the internal states of the agents
         total_exploitation_timesteps, exploitation_callback = self.exploitation_algorithm._setup_learn(
             total_exploitation_timesteps,
             exploitation_callback,
@@ -311,6 +314,16 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             tb_log_name,
             progress_bar,
         )
+
+        total_exploration_timesteps, base_callback = self.base_algorithm._setup_learn(
+            total_exploration_timesteps,
+            base_callback,
+            reset_num_timesteps,
+            tb_log_name,
+            progress_bar,
+        )
+        # align internal env states after reset
+        self.align_agents(current_agent=self.base_algorithm, target_agent=self.exploitation_algorithm)
 
         base_callback.on_training_start(locals(), globals())
         exploitation_callback.on_training_start(locals(), globals())
@@ -340,7 +353,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                 assert self.base_algorithm.ep_info_buffer is not None
                 self.base_algorithm._dump_logs(iteration)
 
-            exploitation_agent_steps = max(self.base_algorithm.n_steps // \
+            exploitation_agent_steps = max((self.base_algorithm.n_steps * self.base_algorithm.n_envs) // \
                                            self.exploration_steps_per_exploitation_gradient_updates, 1)
 
             self.train(exploitation_agent_steps=exploitation_agent_steps)
@@ -357,12 +370,13 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                 reset_num_timesteps=reset_num_timesteps,
                 progress_bar=progress_bar,
             )
+            # align internal states of the agents after training.
+            self.align_agents(current_agent=self.exploitation_algorithm, target_agent=self.base_algorithm)
 
         return self
 
 
 if __name__ == '__main__':
-    import copy
     from stable_baselines3 import SAC
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
@@ -370,7 +384,6 @@ if __name__ == '__main__':
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
     from gymnasium.envs.classic_control.pendulum import PendulumEnv
     from gymnasium.wrappers.time_limit import TimeLimit
-    from stable_baselines3.common.vec_env.vec_normalize import VecNormalize
     from typing import Optional
 
 
@@ -400,15 +413,15 @@ if __name__ == '__main__':
                 self.render()
             return self._get_obs(), {}
 
-    log_dir = './logs_test2/'
+
+    log_dir = './logs2/'
     n_envs = 4
     vec_env = make_vec_env(CustomPendulumEnv, n_envs=4, seed=0, wrapper_class=TimeLimit,
                            env_kwargs={'render_mode': 'rgb_array'},
                            wrapper_kwargs={'max_episode_steps': 200})
     vec_env = VecVideoRecorder(venv=vec_env, video_folder=log_dir,
-                                                  record_video_trigger=lambda x: True,
-                                                  )
-
+                               record_video_trigger=lambda x: True,
+                               )
 
     n_steps = 1024
     eval_callback = EvalCallback(VecVideoRecorder(make_vec_env(CustomPendulumEnv, n_envs=4, seed=1,
@@ -462,7 +475,7 @@ if __name__ == '__main__':
         intrinsic_reward_gradient_steps=1000,
     )
     play_algorithm.learn(
-        total_exploration_timesteps=50_000,
+        total_exploration_timesteps=25_000,
         total_exploitation_timesteps=0,
         exploitation_callback=eval_callback,
     )
