@@ -338,7 +338,8 @@ if __name__ == '__main__':
     ys = torch.concatenate([torch.sin(xs), torch.cos(xs)], dim=1)
     ys = ys + noise_level * torch.randn(size=ys.shape)
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
-    model = EnsembleMLP(input_dim=1, output_dict={'y': ys}, features=(256, 256),
+    model = EnsembleMLP(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
+                                                  'y2': ys[..., -1].reshape(-1, 1)}, features=(256, 256),
                                       optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
                                       learn_std=learn_std)
 
@@ -349,8 +350,9 @@ if __name__ == '__main__':
             model.train()
             model.optimizer.zero_grad()
             predictions = model(X_batch)
-            loss = model.loss(predictions, target={'y': Y_batch})
-            total_loss = torch.stack([val.reshape(-1, 1) for val in loss.values()], dim=-1).mean()
+            loss = model.loss(predictions, target={'y1': Y_batch[..., 0].reshape(-1, 1),
+                                                   'y2': Y_batch[..., -1].reshape(-1, 1)})
+            total_loss = torch.stack([val for val in loss.values()]).mean()
             total_loss.backward()
             model.optimizer.step()
             print('ensemble_loss: ', total_loss)
@@ -359,10 +361,11 @@ if __name__ == '__main__':
     test_xs = torch.linspace(-5, 15, 1000).reshape(-1, 1)
     test_ys = torch.concatenate([torch.sin(test_xs), torch.cos(test_xs)], dim=1)
 
+    predictions = model(test_xs)
     if learn_std:
-        y_pred, _ = model(test_xs)['y']
+        y_pred, = torch.cat([val[0] for val in predictions.values()], dim=-2)
     else:
-        y_pred = model(test_xs)['y']
+        y_pred = torch.cat([val for val in predictions.values()], dim=-2)
 
     xs = xs.cpu().numpy()
     ys = ys.cpu().numpy()
