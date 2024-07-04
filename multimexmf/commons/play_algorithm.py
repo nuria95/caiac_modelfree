@@ -61,6 +61,10 @@ class BasePlayAlgorithm(ABC):
     def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor) -> th.Tensor:
         raise NotImplementedError
 
+    @property
+    def logger(self):
+        return self.base_algorithm.logger
+
     @abstractmethod
     def learn(
             self,
@@ -265,6 +269,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                 batch_size=self.exploitation_algorithm.batch_size,
                 gradient_steps=exploitation_agent_steps)
         self.ensemble_model.train()
+        losses = []
         for step in range(self.intrinsic_reward_gradient_steps):
             replay_data = self.exploitation_algorithm.replay_buffer.sample(
                 self.intrinsic_reward_batch_size, env=self.exploitation_algorithm._vec_normalize_env)
@@ -278,13 +283,18 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             self.ensemble_model.optimizer.zero_grad()
             prediction = self.ensemble_model(inp)
             loss = self.ensemble_model.loss(prediction=prediction, target=target)
-            total_loss = th.stack([val.reshape(-1, 1) for val in loss.values()], dim=-1).mean()
+            stacked_losses = th.stack([val for val in loss.values()], dim=-1)
+            total_loss = stacked_losses.mean()
             total_loss.backward()
+            losses.append(stacked_losses)
 
             self.ensemble_model.optimizer.step()
             # print('ensemble_loss: ', total_loss)
 
         self.ensemble_model.eval()
+        losses = th.stack(losses).detach().numpy().mean(axis=0)
+        for index, key in enumerate(self.ensemble_model.output_dict.keys()):
+            self.logger.record("train/ensemble/" + key, losses[index])
 
     def extract_features(self, obs):
         with th.no_grad():
