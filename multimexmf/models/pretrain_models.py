@@ -83,8 +83,7 @@ class MultiHeadGaussianEnsemble(nn.Module):
     def __init__(self, input_dim: int, output_dict: Dict, num_heads: int = 5,
                  features: Tuple = (256, 256, 256),
                  act_fn: nn.Module = nn.ReLU(), learn_std: bool = False, min_std: float = 1e-3, max_std: float = 1e2,
-                 disagreement_weights: Optional[Dict] = None, use_entropy: bool = True, agg_disag: str = 'sum',
-                 optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
+                 use_entropy: bool = True, optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
                  optimizer_kwargs: Optional[Dict[str, Any]] = None,
                  ):
         super().__init__()
@@ -119,14 +118,9 @@ class MultiHeadGaussianEnsemble(nn.Module):
             output_modules = [[key, nn.Linear(prev_size, num_heads * shape)]
                               for key, shape in self.output_shapes.items()]
         self.output_modules = nn.ModuleDict(output_modules)
-        if disagreement_weights is not None:
-            assert disagreement_weights.keys() == output_dict.keys()
-            self.disagreement_weights = disagreement_weights
-        else:
-            self.disagreement_weights = {k: 1.0 for k in output_dict.keys()}
+
 
         self.use_entropy = use_entropy
-        self.agg_disag = agg_disag
 
         if optimizer_kwargs is None:
             optimizer_kwargs = {}
@@ -163,10 +157,10 @@ class MultiHeadGaussianEnsemble(nn.Module):
                 loss[key] = - (torch.distributions.Normal(mean, std).log_prob(val[..., None]).mean())
             else:
                 mean = prediction[key]
-                loss[key] = - (torch.distributions.Normal(mean, torch.ones_like(mean)).log_prob(val[..., None]).mean())
+                loss[key] = ((mean - val[..., None]) ** 2).mean()
         return loss
 
-    def get_disagreement(self, prediction: Dict) -> torch.Tensor:
+    def get_disagreement(self, prediction: Dict) -> Dict:
         disagreement = {}
         for key, val in prediction.items():
             if self.learn_std:
@@ -174,31 +168,25 @@ class MultiHeadGaussianEnsemble(nn.Module):
                 mean, std = val
                 assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
                 epistemic_std = mean.std(dim=-1)
-                al_std = std.mean(dim=-1)
+                al_std = torch.sqrt(torch.square(std).mean(dim=-1))
                 ratio = torch.square(epistemic_std / al_std)
                 if self.use_entropy:
                     # take mean over output dim
-                    disagreement[key] = torch.log(1 + ratio).mean(dim=-1) * self.disagreement_weights[key]
+                    disagreement[key] = torch.log(1 + ratio).mean(dim=-1)
                 else:
                     # take mean over batch dim
-                    disagreement[key] = ratio.mean(-1) * self.disagreement_weights[key]
+                    disagreement[key] = ratio.mean(-1)
             else:
                 assert val.shape[-1] == self.num_heads
                 epistemic_var = torch.square(val.std(dim=-1))
                 if self.use_entropy:
                     # take mean over output dim
-                    disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1) * self.disagreement_weights[key]
+                    disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
                 else:
                     # take mean over batch dim
-                    disagreement[key] = epistemic_var.mean(dim=-1) * self.disagreement_weights[key]
+                    disagreement[key] = epistemic_var.mean(dim=-1)
 
-        total_disagreements = torch.stack([val.reshape(-1, 1) for val in disagreement.values()], dim=-1)
-        if self.agg_disag == 'max':
-            return total_disagreements.max(dim=-1)
-        elif self.agg_disag == 'sum':
-            return total_disagreements.sum(dim=-1)
-        else:
-            raise NotImplementedError
+        return disagreement
 
 
 class SimpleMLP(nn.Module):
@@ -245,7 +233,7 @@ class EnsembleMLP(nn.Module):
     def __init__(self, input_dim: int, output_dict: Dict, num_heads: int = 5,
                  features: Tuple = (256, 256, 256),
                  act_fn: nn.Module = nn.ReLU(), learn_std: bool = False, min_std: float = 1e-3, max_std: float = 1e2,
-                 disagreement_weights: Optional[Dict] = None, use_entropy: bool = True, agg_disag: str = 'sum',
+                 use_entropy: bool = True,
                  optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
                  optimizer_kwargs: Optional[Dict[str, Any]] = None,
                  ):
@@ -264,14 +252,8 @@ class EnsembleMLP(nn.Module):
             learn_std=learn_std,
         ) for _ in range(num_heads)])
 
-        if disagreement_weights is not None:
-            assert disagreement_weights.keys() == output_dict.keys()
-            self.disagreement_weights = disagreement_weights
-        else:
-            self.disagreement_weights = {k: 1.0 for k in output_dict.keys()}
 
         self.use_entropy = use_entropy
-        self.agg_disag = agg_disag
         self.output_dict = output_dict
 
         if optimizer_kwargs is None:
@@ -311,10 +293,10 @@ class EnsembleMLP(nn.Module):
                 loss[key] = - (torch.distributions.Normal(mean, std).log_prob(val[..., None]).mean())
             else:
                 mean = prediction[key]
-                loss[key] = - (torch.distributions.Normal(mean, torch.ones_like(mean)).log_prob(val[..., None]).mean())
+                loss[key] = ((mean - val[..., None]) ** 2).mean()
         return loss
 
-    def get_disagreement(self, prediction: Dict) -> torch.Tensor:
+    def get_disagreement(self, prediction: Dict) -> Dict:
         disagreement = {}
         for key, val in prediction.items():
             if self.learn_std:
@@ -326,27 +308,20 @@ class EnsembleMLP(nn.Module):
                 ratio = torch.square(epistemic_std / al_std)
                 if self.use_entropy:
                     # take mean over output dim
-                    disagreement[key] = torch.log(1 + ratio).mean(dim=-1) * self.disagreement_weights[key]
+                    disagreement[key] = torch.log(1 + ratio).mean(dim=-1)
                 else:
                     # take mean over batch dim
-                    disagreement[key] = ratio.mean(-1) * self.disagreement_weights[key]
+                    disagreement[key] = ratio.mean(-1)
             else:
                 assert val.shape[-1] == self.num_heads
                 epistemic_var = torch.square(val.std(dim=-1))
                 if self.use_entropy:
                     # take mean over output dim
-                    disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1) * self.disagreement_weights[key]
+                    disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
                 else:
                     # take mean over batch dim
-                    disagreement[key] = epistemic_var.mean(dim=-1) * self.disagreement_weights[key]
-
-        total_disagreements = torch.stack([val.reshape(-1, 1) for val in disagreement.values()], dim=-1)
-        if self.agg_disag == 'max':
-            return total_disagreements.max(dim=-1)
-        elif self.agg_disag == 'sum':
-            return total_disagreements.sum(dim=-1)
-        else:
-            raise NotImplementedError
+                    disagreement[key] = epistemic_var.mean(dim=-1)
+        return disagreement
 
 
 if __name__ == '__main__':
@@ -378,6 +353,7 @@ if __name__ == '__main__':
             total_loss = torch.stack([val.reshape(-1, 1) for val in loss.values()], dim=-1).mean()
             total_loss.backward()
             model.optimizer.step()
+            print('ensemble_loss: ', total_loss)
 
     model.eval()
     test_xs = torch.linspace(-5, 15, 1000).reshape(-1, 1)
