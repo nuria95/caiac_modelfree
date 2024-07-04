@@ -1,7 +1,8 @@
+import torch
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from typing import Union, Type, TypeVar
+from typing import Union, Type, TypeVar, Optional
 from gymnasium import spaces
 import torch as th
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
@@ -12,6 +13,44 @@ from multimexmf.models.pretrain_models import EnsembleMLP
 SelfPlayAlgorithm = TypeVar("SelfPlayAlgorithm", bound="PlayAlgorithm")
 from abc import ABC, abstractmethod
 
+EPS = 1e-6
+
+
+class Normalizer:
+    def __init__(self, input_dim: int, update: bool = True):
+        self.input_dim = input_dim
+        self._reset_normalization_stats()
+        self._update = update
+
+    def reset(self):
+        self._reset_normalization_stats()
+
+    def _reset_normalization_stats(self):
+        self.mean = th.zeros(self.input_dim)
+        self.std = th.ones(self.input_dim)
+        self.num_points = 0
+
+    def update(self, x: th.Tensor):
+        if not self._update:
+            return
+        assert len(x.shape) == 2 and x.shape[-1] == self.input_dim
+        num_points = x.shape[0]
+        total_points = num_points + self.num_points
+        mean = (self.mean * self.num_points + th.sum(x, dim=0)) / total_points
+        new_s_n = th.square(self.std) * self.num_points + th.sum(np.square(x - mean), dim=0) + \
+                  self.num_points * th.square(self.mean - mean)
+
+        new_var = new_s_n / total_points
+        std = th.sqrt(new_var)
+        self.mean = mean
+        self.std = torch.clamp(std, min=EPS)
+
+    def normalize(self, x: th.Tensor):
+        return (x - self.mean) / self.std
+
+    def denormalize(self, norm_x: th.Tensor):
+        return norm_x * self.std + self.mean
+
 
 class BasePlayAlgorithm(ABC):
     def __init__(self,
@@ -20,20 +59,25 @@ class BasePlayAlgorithm(ABC):
                  env: Union[GymEnv, str, None],
                  base_algorithm_kwargs: dict,
                  exploitation_algorithm_kwargs: dict,
-                 disagreement_model_kwargs: dict,
+                 ensemble_model_kwargs: dict,
+                 intrinsic_reward_weights: Optional[dict] = None,
+                 agg_intrinsic_reward: str = 'sum',
                  exploitation_learning_starts: int = 1000,
                  intrinsic_reward_gradient_steps: int = 1000,
                  intrinsic_reward_batch_size: int = 64,
+                 normalize_ensemble_training: bool = True,
                  ):
+        self.normalize_ensemble_training = normalize_ensemble_training
         # base algorithm processes env
         self.base_algorithm = base_algorithm_cls(env=env, **base_algorithm_kwargs)
         # Processed env is passed to the exploitation algorithm. Both envs refer to the same object
         self.exploitation_algorithm = exploitation_algorithm_cls(env=self.base_algorithm.env,
                                                                  **exploitation_algorithm_kwargs)
-        self._setup_model(disagreement_model_kwargs)
+        self._setup_model(ensemble_model_kwargs, intrinsic_reward_weights)
         self.exploitation_learning_starts = exploitation_learning_starts
         self.intrinsic_reward_gradient_steps = intrinsic_reward_gradient_steps
         self.intrinsic_reward_batch_size = intrinsic_reward_batch_size
+        self.agg_intrinsic_reward = agg_intrinsic_reward
 
     @staticmethod
     def align_agents(current_agent: BaseAlgorithm, target_agent: BaseAlgorithm):
@@ -42,23 +86,44 @@ class BasePlayAlgorithm(ABC):
         target_agent._last_original_obs = current_agent._last_original_obs
         target_agent._last_episode_starts = current_agent._last_episode_starts
 
-    def _setup_model(self, disagreement_model_kwargs) -> None:
+    def _setup_model(self, ensemble_model_kwargs, intrinsic_reward_weights) -> None:
         obs_dim, act_dim = self.base_algorithm.observation_space.shape[0], self.base_algorithm.action_space.shape[0]
         output_dict = {'next_obs': self.base_algorithm.observation_space.sample()}
         self.ensemble_model = EnsembleMLP(
             input_dim=obs_dim + act_dim,
             output_dict=output_dict,
-            **disagreement_model_kwargs,
+            **ensemble_model_kwargs,
         )
+        self._setup_normalizer(input_dim=obs_dim + act_dim, output_dict=output_dict)
+
+        if intrinsic_reward_weights is not None:
+            assert intrinsic_reward_weights.keys() == output_dict.keys()
+            self.intrinsic_reward_weights = intrinsic_reward_weights
+        else:
+            self.intrinsic_reward_weights = {k: 1.0 for k in output_dict.keys()}
+
+    def _setup_normalizer(self, input_dim: int, output_dict: dict):
+        self.input_normalizer = Normalizer(input_dim=input_dim, update=self.normalize_ensemble_training)
+        output_normalizers = {}
+        for key, val in output_dict.items():
+            output_normalizers[key] = Normalizer(input_dim=val.shape[-1], update=self.normalize_ensemble_training)
+        self.output_normalizers = output_normalizers
+
+    def aggregate_intrinsic_reward(self, intrinsic_rewards: th.Tensor):
+        assert intrinsic_rewards.shape[0] == len(self.output_normalizers.keys())
+        if self.agg_intrinsic_reward == 'sum':
+            intrinsic_rewards = intrinsic_rewards.sum(dim=0)
+        elif self.agg_intrinsic_reward == 'max':
+            intrinsic_rewards = intrinsic_rewards.max(dim=0)
+        else:
+            raise NotImplementedError
+        return intrinsic_rewards
 
     def train(self, exploitation_agent_steps: int) -> None:
         """
         Consume current rollout data and update policy parameters.
         Implemented by individual algorithms.
         """
-        raise NotImplementedError
-
-    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor) -> th.Tensor:
         raise NotImplementedError
 
     @property
@@ -95,29 +160,12 @@ class BasePlayAlgorithm(ABC):
 
 class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
     def __init__(self,
-                 base_algorithm_cls: Type[OnPolicyAlgorithm],
-                 exploitation_algorithm_cls: Type[OffPolicyAlgorithm],
-                 env: Union[GymEnv, str, None],
-                 base_algorithm_kwargs: dict,
-                 exploitation_algorithm_kwargs: dict,
-                 disagreement_model_kwargs: dict,
                  pred_diff: bool = True,
                  exploration_steps_per_exploitation_gradient_updates: int = 2,
-                 exploitation_learning_starts: int = 1000,
-                 intrinsic_reward_gradient_steps: int = 1000,
-                 intrinsic_reward_batch_size: int = 64,
+                 *args,
+                 **kwargs,
                  ):
-        super().__init__(
-            base_algorithm_cls=base_algorithm_cls,
-            exploitation_algorithm_cls=exploitation_algorithm_cls,
-            env=env,
-            base_algorithm_kwargs=base_algorithm_kwargs,
-            exploitation_algorithm_kwargs=exploitation_algorithm_kwargs,
-            disagreement_model_kwargs=disagreement_model_kwargs,
-            exploitation_learning_starts=exploitation_learning_starts,
-            intrinsic_reward_gradient_steps=intrinsic_reward_gradient_steps,
-            intrinsic_reward_batch_size=intrinsic_reward_batch_size,
-        )
+        super().__init__(*args, **kwargs)
         self.pred_diff = pred_diff
         self.exploration_steps_per_exploitation_gradient_updates = exploration_steps_per_exploitation_gradient_updates
 
@@ -153,12 +201,18 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
 
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
+                # if using vec_normalize wrapper the last_obs is the normalized obs!
                 obs_tensor = obs_as_tensor(self.base_algorithm._last_obs, self.base_algorithm.device)
                 actions, values, log_probs = self.base_algorithm.policy(obs_tensor)
                 # Get intrinsic reward for the exploration_agent
-                intrinsic_rewards = self.get_intrinsic_reward(obs_tensor, actions)
             actions = actions.cpu().numpy()
-            intrinsic_rewards = intrinsic_rewards.cpu().numpy().reshape(-1)
+            """
+            Dummy test
+            print(
+                'last_obs exploration: ', self.base_algorithm._last_obs,
+                'last_obs exploitation: ', self.exploitation_algorithm._last_obs,
+            )
+            """
 
             # Rescale and perform action
             clipped_actions = actions
@@ -177,6 +231,11 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                         buffer_action = self.base_algorithm.policy.scale_action(clipped_actions)
 
             new_obs, rewards, dones, infos = env.step(clipped_actions)
+            with th.no_grad():
+                labels = {'next_obs': obs_as_tensor(new_obs, self.base_algorithm.device)}
+                intrinsic_rewards = self.get_intrinsic_reward(obs_tensor, torch.from_numpy(buffer_action), labels)
+
+            intrinsic_rewards = intrinsic_rewards.cpu().numpy().reshape(-1)
 
             self.base_algorithm.num_timesteps += env.num_envs
 
@@ -192,8 +251,19 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             # Store data in replay buffer (normalized action and unnormalized observation)
             # store true reward in the buffer
             # automatically updates the internal state of the algorithm: last_obs =  next_obs
+            # exploitation buffer automatically stores unnormalized obs
             self.exploitation_algorithm._store_transition(replay_buffer, buffer_action, new_obs, rewards, dones,
                                                           infos)  # type: ignore[arg-type]
+            """
+            sample = self.exploitation_algorithm.replay_buffer.sample(64,
+                                                                   env=self.exploitation_algorithm._vec_normalize_env)
+
+            print('sample obs replay buffer exploration', sample.observations)
+            sample = self.exploitation_algorithm.replay_buffer.sample(64,
+                                                                            env=self.base_algorithm._vec_normalize_env)
+            print('sample obs replay buffer exploration', sample.observations)
+            """
+
 
             # TODO: SEE if this should be called
             # For DQN, check if the target network should be updated
@@ -250,13 +320,8 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
 
         return True
 
-    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor) -> th.Tensor:
-        self.ensemble_model.eval()
-        features = self.extract_features(obs)
-        inp = th.cat([features, action], dim=-1)
-        predictions = self.ensemble_model(inp)
-        disg = self.ensemble_model.get_disagreement(predictions)
-        return disg
+    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor, labels: dict) -> th.Tensor:
+        raise NotImplementedError
 
     def train(self, exploitation_agent_steps: int) -> None:
         self.base_algorithm.train()
@@ -271,25 +336,30 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
         self.ensemble_model.train()
         losses = []
         for step in range(self.intrinsic_reward_gradient_steps):
+            # need to pass vec normalize env to get normalized obs and next obs -->
+            # these are the ones used to calculate intrinsic reward during rollout
             replay_data = self.exploitation_algorithm.replay_buffer.sample(
                 self.intrinsic_reward_batch_size, env=self.exploitation_algorithm._vec_normalize_env)
             if self.pred_diff:
                 target = {'next_obs': replay_data.next_observations - replay_data.observations}
             else:
                 target = {'next_obs': replay_data.next_observations}
-
+            # observations should be unnormalized for t
             features = self.extract_features(replay_data.observations)
             inp = th.cat([features, replay_data.actions], dim=-1)
+            self.input_normalizer.update(inp)
+            inp = self.input_normalizer.normalize(inp)
+            for key, y in target.items():
+                self.output_normalizers[key].update(y)
+                target[key] = self.output_normalizers[key].normalize(y)
             self.ensemble_model.optimizer.zero_grad()
             prediction = self.ensemble_model(inp)
             loss = self.ensemble_model.loss(prediction=prediction, target=target)
-            stacked_losses = th.stack([val for val in loss.values()], dim=-1)
+            stacked_losses = th.stack([val for val in loss.values()])
             total_loss = stacked_losses.mean()
             total_loss.backward()
             losses.append(stacked_losses)
-
             self.ensemble_model.optimizer.step()
-            # print('ensemble_loss: ', total_loss)
 
         self.ensemble_model.eval()
         losses = th.stack(losses).detach().numpy().mean(axis=0)
@@ -314,7 +384,6 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             progress_bar: bool = False,
     ):
         iteration = 0
-        initial_exploitation_callback = exploitation_callback
         # update callbacks for base and exploration algorithms. Setup learn, resets the environments and thus,
         # updates the internal states of the agents
         total_exploitation_timesteps, exploitation_callback = self.exploitation_algorithm._setup_learn(
@@ -362,6 +431,8 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             if log_interval is not None and iteration % log_interval == 0:
                 assert self.base_algorithm.ep_info_buffer is not None
                 self.base_algorithm._dump_logs(iteration)
+                assert self.exploitation_algorithm.ep_info_buffer is not None
+                self.exploitation_algorithm._dump_logs()
 
             exploitation_agent_steps = max((self.base_algorithm.n_steps * self.base_algorithm.n_envs) // \
                                            self.exploration_steps_per_exploitation_gradient_updates, 1)
@@ -374,7 +445,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             print('Training exploitation policy')
             self.exploitation_algorithm.learn(
                 total_timesteps=total_exploitation_timesteps,
-                callback=initial_exploitation_callback,
+                callback=exploitation_callback,
                 log_interval=log_interval,
                 tb_log_name=tb_log_name,
                 reset_num_timesteps=reset_num_timesteps,
@@ -384,6 +455,42 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             self.align_agents(current_agent=self.exploitation_algorithm, target_agent=self.base_algorithm)
 
         return self
+
+
+class CuriosityOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor, labels: dict) -> th.Tensor:
+        self.ensemble_model.eval()
+        features = self.extract_features(obs)
+        inp = th.cat([features, action], dim=-1)
+        inp = self.input_normalizer.normalize(inp)
+        predictions = self.ensemble_model(inp)
+        # use model error as intrinsic reward
+        curiosity = torch.stack([
+            # take mean of ensemble as prediction
+            ((predictions[key].mean(dim=-1) - y) ** 2
+             ).mean(dim=-1) * self.intrinsic_reward_weights[key] # take mean error over the dimension of output
+            for key, y in labels.items()])
+        curiosity = self.aggregate_intrinsic_reward(curiosity)
+        return curiosity
+
+
+class DisagreementOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor, labels: dict) -> th.Tensor:
+        self.ensemble_model.eval()
+        features = self.extract_features(obs)
+        inp = th.cat([features, action], dim=-1)
+        inp = self.input_normalizer.normalize(inp)
+        predictions = self.ensemble_model(inp)
+        disg = self.ensemble_model.get_disagreement(predictions)
+        disg = torch.stack([val * self.intrinsic_reward_weights[key] for key, val in disg.items()])
+        disg = self.aggregate_intrinsic_reward(disg)
+        return disg
 
 
 if __name__ == '__main__':
@@ -470,18 +577,18 @@ if __name__ == '__main__':
         'verbose': 1,
     }
 
-    disagreement_model_kwargs = {
+    ensemble_model_kwargs = {
         'learn_std': False,
         'optimizer_kwargs': {'lr': 3e-4, 'weight_decay': 1e-4}
     }
 
-    play_algorithm = OnPolicyPlayAlgorithm(
+    play_algorithm = DisagreementOnPolicyPlayAlgorithm(
         base_algorithm_cls=base_algorithm_cls,
         exploitation_algorithm_cls=exploitation_algorithm_cls,
         env=vec_env,
         base_algorithm_kwargs=base_algorithm_kwargs,
         exploitation_algorithm_kwargs=exploitation_algorithm_kwargs,
-        disagreement_model_kwargs=disagreement_model_kwargs,
+        ensemble_model_kwargs=ensemble_model_kwargs,
         intrinsic_reward_gradient_steps=1000,
     )
     play_algorithm.learn(
