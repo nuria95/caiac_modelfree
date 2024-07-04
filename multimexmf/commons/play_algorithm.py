@@ -66,12 +66,14 @@ class BasePlayAlgorithm(ABC):
                  intrinsic_reward_gradient_steps: int = 1000,
                  intrinsic_reward_batch_size: int = 64,
                  normalize_ensemble_training: bool = True,
+                 seed: Optional[int] = None,
                  ):
         self.normalize_ensemble_training = normalize_ensemble_training
         # base algorithm processes env
-        self.base_algorithm = base_algorithm_cls(env=env, **base_algorithm_kwargs)
+        self.base_algorithm = base_algorithm_cls(env=env, seed=seed, **base_algorithm_kwargs)
         # Processed env is passed to the exploitation algorithm. Both envs refer to the same object
         self.exploitation_algorithm = exploitation_algorithm_cls(env=self.base_algorithm.env,
+                                                                 seed=seed,
                                                                  **exploitation_algorithm_kwargs)
         self._setup_model(ensemble_model_kwargs, intrinsic_reward_weights)
         self.exploitation_learning_starts = exploitation_learning_starts
@@ -455,6 +457,14 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             self.align_agents(current_agent=self.exploitation_algorithm, target_agent=self.base_algorithm)
 
         return self
+
+
+class RandomOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def get_intrinsic_reward(self, obs: th.Tensor, action: th.Tensor, labels: dict) -> th.Tensor:
+        return torch.zeros(obs.shape[0])
 
 
 class CuriosityOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
