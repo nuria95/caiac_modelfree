@@ -2,7 +2,7 @@ from M3L.models.pretrain_models import VTMAE as M3LVTMAE
 import torch
 import torch.nn as nn
 from typing import Tuple, Dict, Optional, Type, Any
-from stable_baselines3.common.type_aliases import Schedule
+
 
 EPS = 1e-6
 
@@ -119,7 +119,6 @@ class MultiHeadGaussianEnsemble(nn.Module):
                               for key, shape in self.output_shapes.items()]
         self.output_modules = nn.ModuleDict(output_modules)
 
-
         self.use_entropy = use_entropy
 
         if optimizer_kwargs is None:
@@ -154,7 +153,8 @@ class MultiHeadGaussianEnsemble(nn.Module):
                 assert isinstance(prediction[key], Tuple)
                 # dim: batch, feature, num_ensemble
                 mean, std = prediction[key]
-                loss[key] = - (torch.distributions.Normal(mean, std).log_prob(val[..., None]).mean())
+                var = torch.square(std)
+                loss[key] = (((mean - val[..., None]) ** 2) / var + 2 * torch.log(var)).mean()
             else:
                 mean = prediction[key]
                 loss[key] = ((mean - val[..., None]) ** 2).mean()
@@ -252,7 +252,6 @@ class EnsembleMLP(nn.Module):
             learn_std=learn_std,
         ) for _ in range(num_heads)])
 
-
         self.use_entropy = use_entropy
         self.output_dict = output_dict
 
@@ -290,7 +289,8 @@ class EnsembleMLP(nn.Module):
                 assert isinstance(prediction[key], Tuple)
                 # dim: batch, feature, num_ensemble
                 mean, std = prediction[key]
-                loss[key] = - (torch.distributions.Normal(mean, std).log_prob(val[..., None]).mean())
+                var = torch.square(std)
+                loss[key] = (((mean - val[..., None]) ** 2) / var + 2 * torch.log(var)).mean()
             else:
                 mean = prediction[key]
                 loss[key] = ((mean - val[..., None]) ** 2).mean()
@@ -340,10 +340,10 @@ if __name__ == '__main__':
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
     model = EnsembleMLP(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
                                                   'y2': ys[..., -1].reshape(-1, 1)}, features=(256, 256),
-                                      optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
-                                      learn_std=learn_std)
+                        optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
+                        learn_std=learn_std)
 
-    n_epochs = 1000
+    n_epochs = 1_000
     n_steps = 0
     for i in range(n_epochs):
         for X_batch, Y_batch in train_loader:
@@ -363,7 +363,7 @@ if __name__ == '__main__':
 
     predictions = model(test_xs)
     if learn_std:
-        y_pred, = torch.cat([val[0] for val in predictions.values()], dim=-2)
+        y_pred = torch.cat([val[0] for val in predictions.values()], dim=-2)
     else:
         y_pred = torch.cat([val for val in predictions.values()], dim=-2)
 

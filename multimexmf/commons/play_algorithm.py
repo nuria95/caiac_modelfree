@@ -39,7 +39,7 @@ class Normalizer:
         num_points = x.shape[0]
         total_points = num_points + self.num_points
         mean = (self.mean * self.num_points + th.sum(x, dim=0)) / total_points
-        new_s_n = th.square(self.std) * self.num_points + th.sum(np.square(x - mean), dim=0) + \
+        new_s_n = th.square(self.std) * self.num_points + th.sum(th.square(x - mean), dim=0) + \
                   self.num_points * th.square(self.mean - mean)
 
         new_var = new_s_n / total_points
@@ -385,6 +385,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             total_exploitation_timesteps: int,
             base_callback: MaybeCallback = None,
             exploitation_callback: MaybeCallback = None,
+            fewshot_callback: MaybeCallback = None,
             log_interval: int = 100,
             tb_log_name: str = "run",
             reset_num_timesteps: bool = True,
@@ -452,7 +453,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             print('Training exploitation policy')
             self.exploitation_algorithm.learn(
                 total_timesteps=total_exploitation_timesteps,
-                callback=exploitation_callback,
+                callback=fewshot_callback,
                 log_interval=log_interval,
                 tb_log_name=tb_log_name,
                 reset_num_timesteps=reset_num_timesteps,
@@ -569,6 +570,19 @@ if __name__ == '__main__':
                                  eval_freq=n_steps,
                                  n_eval_episodes=5, deterministic=True,
                                  render=True)
+    fewshot_callback = EvalCallback(VecVideoRecorder(make_vec_env(CustomPendulumEnv, n_envs=4, seed=1,
+                                                               env_kwargs={'render_mode': 'rgb_array'},
+                                                               wrapper_class=TimeLimit,
+                                                               wrapper_kwargs={'max_episode_steps': 200}
+                                                               ),
+                                                  video_folder=log_dir + 'eval/',
+                                                  record_video_trigger=lambda x: True,
+                                                  ),
+                                 log_path=log_dir,
+                                 best_model_save_path=log_dir,
+                                 eval_freq=32,
+                                 n_eval_episodes=5, deterministic=True,
+                                 render=True)
     base_algorithm_cls = PPO
     base_algorithm_kwargs = {
         'policy': 'MlpPolicy',
@@ -610,4 +624,5 @@ if __name__ == '__main__':
         total_exploration_timesteps=25_000,
         total_exploitation_timesteps=0,
         exploitation_callback=eval_callback,
+        fewshot_callback=fewshot_callback,
     )
