@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="572af58c-def8-4658-9cf1-627a647febf2" name="euler">
+        <fileTransfer rootFolder="/cluster/home/sukhijab" accessType="SFTP" host="euler.ethz.ch" port="22" sshConfigId="de62552e-87c8-4d07-8347-812190006b72" sshConfig="sukhijab@euler.ethz.ch:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

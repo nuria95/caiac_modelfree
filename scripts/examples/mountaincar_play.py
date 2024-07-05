@@ -17,6 +17,7 @@ from experiments.utils import Logger, hash_dict
 
 
 def experiment(
+        logs_dir: str = './logs/',
         project_name: str = 'MCTest',
         alg: str = 'SAC',
         total_steps: int = 25_000,
@@ -30,8 +31,7 @@ def experiment(
         ensemble_wd: float = 1e-4,
         seed: int = 0,
 ):
-    log_dir = './logs/'
-    tb_dir = 'runs'
+    tb_dir = logs_dir + 'runs'
 
     config = dict(
         alg=alg,
@@ -46,8 +46,9 @@ def experiment(
         ensemble_wd=ensemble_wd,
     )
 
-    wandb.tensorboard.patch(root_logdir=tb_dir)
-    wandb.init(
+    # wandb.tensorboard.patch(root_logdir=tb_dir)
+    run = wandb.init(
+        dir=logs_dir,
         project=project_name,
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
         monitor_gym=True,  # auto-upload the videos of agents playing the game
@@ -71,19 +72,19 @@ def experiment(
 
     if record_video:
         eval_callback = EvalCallback(VecVideoRecorder(eval_env,
-                                                      video_folder=log_dir + 'eval/',
+                                                      video_folder=logs_dir + 'eval/',
                                                       record_video_trigger=lambda x: True,
                                                       ),
-                                     log_path=log_dir,
-                                     best_model_save_path=log_dir,
+                                     log_path=logs_dir,
+                                     best_model_save_path=logs_dir,
                                      eval_freq=num_steps,
                                      n_eval_episodes=5,
                                      deterministic=True,
                                      render=True)
     else:
         eval_callback = EvalCallback(eval_env,
-                                     log_path=log_dir,
-                                     best_model_save_path=log_dir,
+                                     log_path=logs_dir,
+                                     best_model_save_path=logs_dir,
                                      eval_freq=num_steps,
                                      n_eval_episodes=5,
                                      deterministic=True,
@@ -106,7 +107,7 @@ def experiment(
         'max_grad_norm': 5,
         'vf_coef': 0.19,
         'batch_size': num_envs * num_steps,
-        'tensorboard_log': f"{tb_dir}/ppo/"
+        'tensorboard_log': f"{tb_dir}/{run.id}"
     }
 
     exploitation_algorithm_cls = SAC
@@ -123,7 +124,7 @@ def experiment(
         'policy': 'MlpPolicy',
         'verbose': 1,
         'gamma': 0.9999,
-        'tensorboard_log': f"{tb_dir}/sac/"
+        'tensorboard_log': f"{tb_dir}/{run.id}"
     }
 
     ensemble_model_kwargs = {
@@ -227,6 +228,7 @@ def main(args):
     np.random.seed(args.seed)
 
     experiment(
+        logs_dir=args.logs_dir,
         project_name=args.project_name,
         alg=args.alg,
         total_steps=args.total_steps,
@@ -246,6 +248,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MTTest')
 
     # general experiment args
+    parser.add_argument('--logs_dir', type=str, default='./logs/')
     parser.add_argument('--project_name', type=str, default='MCTest')
     parser.add_argument('--alg', type=str, default='Disagreement')
     parser.add_argument('--total_steps', type=int, default=25_000)

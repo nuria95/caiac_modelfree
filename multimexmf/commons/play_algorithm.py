@@ -9,6 +9,7 @@ from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 from stable_baselines3.common.utils import obs_as_tensor
 import numpy as np
 from multimexmf.models.pretrain_models import EnsembleMLP
+from stable_baselines3.common.utils import get_device
 
 SelfPlayAlgorithm = TypeVar("SelfPlayAlgorithm", bound="PlayAlgorithm")
 from abc import ABC, abstractmethod
@@ -17,8 +18,9 @@ EPS = 1e-6
 
 
 class Normalizer:
-    def __init__(self, input_dim: int, update: bool = True):
+    def __init__(self, input_dim: int, update: bool = True, device: Union[th.device, str] = "auto"):
         self.input_dim = input_dim
+        self.device = get_device(device)
         self._reset_normalization_stats()
         self._update = update
 
@@ -26,8 +28,8 @@ class Normalizer:
         self._reset_normalization_stats()
 
     def _reset_normalization_stats(self):
-        self.mean = th.zeros(self.input_dim)
-        self.std = th.ones(self.input_dim)
+        self.mean = th.zeros(self.input_dim, device=self.device)
+        self.std = th.ones(self.input_dim, device=self.device)
         self.num_points = 0
 
     def update(self, x: th.Tensor):
@@ -74,6 +76,7 @@ class BasePlayAlgorithm(ABC):
         # Processed env is passed to the exploitation algorithm. Both envs refer to the same object
         self.exploitation_algorithm = exploitation_algorithm_cls(env=self.base_algorithm.env,
                                                                  seed=seed,
+                                                                 device=self.base_algorithm.device,
                                                                  **exploitation_algorithm_kwargs)
         self._setup_model(ensemble_model_kwargs, intrinsic_reward_weights)
         self.exploitation_learning_starts = exploitation_learning_starts
@@ -235,7 +238,10 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             new_obs, rewards, dones, infos = env.step(clipped_actions)
             with th.no_grad():
                 labels = {'next_obs': obs_as_tensor(new_obs, self.base_algorithm.device)}
-                intrinsic_rewards = self.get_intrinsic_reward(obs_tensor, torch.from_numpy(buffer_action), labels)
+                intrinsic_rewards = self.get_intrinsic_reward(obs_tensor,
+                                                              torch.as_tensor(buffer_action,
+                                                                              device=self.base_algorithm.device),
+                                                              labels)
 
             intrinsic_rewards = intrinsic_rewards.cpu().numpy().reshape(-1)
 
@@ -265,7 +271,6 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
                                                                             env=self.base_algorithm._vec_normalize_env)
             print('sample obs replay buffer exploration', sample.observations)
             """
-
 
             # TODO: SEE if this should be called
             # For DQN, check if the target network should be updated
@@ -481,7 +486,7 @@ class CuriosityOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
         curiosity = torch.stack([
             # take mean of ensemble as prediction
             ((predictions[key].mean(dim=-1) - y) ** 2
-             ).mean(dim=-1) * self.intrinsic_reward_weights[key] # take mean error over the dimension of output
+             ).mean(dim=-1) * self.intrinsic_reward_weights[key]  # take mean error over the dimension of output
             for key, y in labels.items()])
         curiosity = self.aggregate_intrinsic_reward(curiosity)
         return curiosity

@@ -1,22 +1,22 @@
 from experiments.utils import generate_run_commands, generate_base_command, dict_permutations
-from scripts.examples.mountaincar_play import experiment as exp
+from scripts.examples import mountaincar_play as exp
 import argparse
 
 PROJECT_NAME = 'MCTest-04April'
 _applicable_configs = {
-        'alg': ['SAC', 'Random', 'Curiosity', 'Disagreement'],
-        'total_steps': [25_000],
-        'num_envs': [8],
-        'num_steps': [256],
-        'normalize': [1],
-        'record_video': [1],
-        'intrinsic_reward_gradient_steps': [100],
-        'exploration_steps_per_exploitation_gradient_updates': [1],
-        'ensemble_lr': [1e-3],
-        'ensemble_wd': [1e-4],
-        'seed': [0],
+    'alg': ['SAC', 'Random', 'Curiosity', 'Disagreement'],
+    'total_steps': [25_000],
+    'num_envs': [8],
+    'num_steps': [256],
+    'normalize': [0],
+    'record_video': [0],
+    'intrinsic_reward_gradient_steps': [100],
+    'exploration_steps_per_exploitation_gradient_updates': [1],
+    'ensemble_lr': [1e-3],
+    'ensemble_wd': [1e-4],
+    'seed': list(range(5)),
+    'project_name': [PROJECT_NAME]
 }
-
 
 all_flags_combinations = dict_permutations(_applicable_configs)
 
