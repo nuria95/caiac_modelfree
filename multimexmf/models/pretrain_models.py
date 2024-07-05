@@ -1,7 +1,9 @@
 from M3L.models.pretrain_models import VTMAE as M3LVTMAE
 import torch
+import torch as th
 import torch.nn as nn
-from typing import Tuple, Dict, Optional, Type, Any
+from typing import Tuple, Dict, Optional, Type, Any, Union
+from stable_baselines3.common.utils import get_device
 
 
 EPS = 1e-6
@@ -77,6 +79,42 @@ class VTMAE(M3LVTMAE):
             'tactile': tactile_tokens,
         }
         return self.aggregate_patches(embeddings)
+
+class Normalizer:
+    def __init__(self, input_dim: int, update: bool = True, device: Union[th.device, str] = "auto"):
+        self.input_dim = input_dim
+        self.device = get_device(device)
+        self._reset_normalization_stats()
+        self._update = update
+
+    def reset(self):
+        self._reset_normalization_stats()
+
+    def _reset_normalization_stats(self):
+        self.mean = th.zeros(self.input_dim, device=self.device)
+        self.std = th.ones(self.input_dim, device=self.device)
+        self.num_points = 0
+
+    def update(self, x: th.Tensor):
+        if not self._update:
+            return
+        assert len(x.shape) == 2 and x.shape[-1] == self.input_dim
+        num_points = x.shape[0]
+        total_points = num_points + self.num_points
+        mean = (self.mean * self.num_points + th.sum(x, dim=0)) / total_points
+        new_s_n = th.square(self.std) * self.num_points + th.sum(th.square(x - mean), dim=0) + \
+                  self.num_points * th.square(self.mean - mean)
+
+        new_var = new_s_n / total_points
+        std = th.sqrt(new_var)
+        self.mean = mean
+        self.std = torch.clamp(std, min=EPS)
+
+    def normalize(self, x: th.Tensor):
+        return (x - self.mean) / self.std
+
+    def denormalize(self, norm_x: th.Tensor):
+        return norm_x * self.std + self.mean
 
 
 class MultiHeadGaussianEnsemble(nn.Module):

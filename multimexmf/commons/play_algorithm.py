@@ -2,56 +2,14 @@ import torch
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from typing import Union, Type, TypeVar, Optional
+from typing import Union, Type, Optional
 from gymnasium import spaces
 import torch as th
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 from stable_baselines3.common.utils import obs_as_tensor
 import numpy as np
-from multimexmf.models.pretrain_models import EnsembleMLP
-from stable_baselines3.common.utils import get_device
-
-SelfPlayAlgorithm = TypeVar("SelfPlayAlgorithm", bound="PlayAlgorithm")
+from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer
 from abc import ABC, abstractmethod
-
-EPS = 1e-6
-
-
-class Normalizer:
-    def __init__(self, input_dim: int, update: bool = True, device: Union[th.device, str] = "auto"):
-        self.input_dim = input_dim
-        self.device = get_device(device)
-        self._reset_normalization_stats()
-        self._update = update
-
-    def reset(self):
-        self._reset_normalization_stats()
-
-    def _reset_normalization_stats(self):
-        self.mean = th.zeros(self.input_dim, device=self.device)
-        self.std = th.ones(self.input_dim, device=self.device)
-        self.num_points = 0
-
-    def update(self, x: th.Tensor):
-        if not self._update:
-            return
-        assert len(x.shape) == 2 and x.shape[-1] == self.input_dim
-        num_points = x.shape[0]
-        total_points = num_points + self.num_points
-        mean = (self.mean * self.num_points + th.sum(x, dim=0)) / total_points
-        new_s_n = th.square(self.std) * self.num_points + th.sum(th.square(x - mean), dim=0) + \
-                  self.num_points * th.square(self.mean - mean)
-
-        new_var = new_s_n / total_points
-        std = th.sqrt(new_var)
-        self.mean = mean
-        self.std = torch.clamp(std, min=EPS)
-
-    def normalize(self, x: th.Tensor):
-        return (x - self.mean) / self.std
-
-    def denormalize(self, norm_x: th.Tensor):
-        return norm_x * self.std + self.mean
 
 
 class BasePlayAlgorithm(ABC):
@@ -240,7 +198,10 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
 
             new_obs, rewards, dones, infos = env.step(clipped_actions)
             with th.no_grad():
-                labels = {'next_obs': obs_as_tensor(new_obs, self.base_algorithm.device)}
+                if self.pred_diff:
+                    labels = {'next_obs': obs_as_tensor(new_obs, self.base_algorithm.device) - obs_tensor}
+                else:
+                    labels = {'next_obs': obs_as_tensor(new_obs, self.base_algorithm.device)}
                 intrinsic_rewards = self.get_intrinsic_reward(obs_tensor,
                                                               torch.as_tensor(buffer_action,
                                                                               device=self.base_algorithm.device),
@@ -486,6 +447,9 @@ class CuriosityOnPolicyPlayAlgorithm(OnPolicyPlayAlgorithm):
         inp = th.cat([features, action], dim=-1)
         inp = self.input_normalizer.normalize(inp)
         predictions = self.ensemble_model(inp)
+        for key, y in labels.items():
+            self.output_normalizers[key].update(y)
+            labels[key] = self.output_normalizers[key].normalize(y)
         # use model error as intrinsic reward
         curiosity = torch.stack([
             # take mean of ensemble as prediction
