@@ -81,6 +81,16 @@ def experiment(
                                      n_eval_episodes=5,
                                      deterministic=True,
                                      render=True)
+        fewshot_callback = EvalCallback(VecVideoRecorder(eval_env,
+                                                         video_folder=logs_dir + 'eval/',
+                                                         record_video_trigger=lambda x: True,
+                                                         ),
+                                        log_path=logs_dir,
+                                        best_model_save_path=logs_dir,
+                                        eval_freq=20,
+                                        n_eval_episodes=5,
+                                        deterministic=True,
+                                        render=True)
     else:
         eval_callback = EvalCallback(eval_env,
                                      log_path=logs_dir,
@@ -90,6 +100,14 @@ def experiment(
                                      deterministic=True,
                                      render=False
                                      )
+        fewshot_callback = EvalCallback(eval_env,
+                                        log_path=logs_dir,
+                                        best_model_save_path=logs_dir,
+                                        eval_freq=num_steps,
+                                        n_eval_episodes=5,
+                                        deterministic=True,
+                                        render=False
+                                        )
 
     base_algorithm_cls = PPO
     base_algorithm_kwargs = {
@@ -205,6 +223,7 @@ def experiment(
         log_interval=1,
         base_callback=WandbCallback(),
         exploitation_callback=[WandbCallback(), eval_callback],
+        fewshot_callback=[WandbCallback(), fewshot_callback]
     )
 
 
@@ -250,7 +269,7 @@ if __name__ == '__main__':
     # general experiment args
     parser.add_argument('--logs_dir', type=str, default='./logs/')
     parser.add_argument('--project_name', type=str, default='MCTest')
-    parser.add_argument('--alg', type=str, default='Disagreement')
+    parser.add_argument('--alg', type=str, default='SAC')
     parser.add_argument('--total_steps', type=int, default=25_000)
     parser.add_argument('--num_envs', type=int, default=8)
     parser.add_argument('--num_steps', type=int, default=256)

@@ -78,7 +78,7 @@ class BasePlayAlgorithm(ABC):
                                                                  seed=seed,
                                                                  device=self.base_algorithm.device,
                                                                  **exploitation_algorithm_kwargs)
-        self._setup_model(ensemble_model_kwargs, intrinsic_reward_weights)
+        self._setup_model(ensemble_model_kwargs, intrinsic_reward_weights, device=self.base_algorithm.device)
         self.exploitation_learning_starts = exploitation_learning_starts
         self.intrinsic_reward_gradient_steps = intrinsic_reward_gradient_steps
         self.intrinsic_reward_batch_size = intrinsic_reward_batch_size
@@ -91,7 +91,7 @@ class BasePlayAlgorithm(ABC):
         target_agent._last_original_obs = current_agent._last_original_obs
         target_agent._last_episode_starts = current_agent._last_episode_starts
 
-    def _setup_model(self, ensemble_model_kwargs, intrinsic_reward_weights) -> None:
+    def _setup_model(self, ensemble_model_kwargs, intrinsic_reward_weights, device: th.device) -> None:
         obs_dim, act_dim = self.base_algorithm.observation_space.shape[0], self.base_algorithm.action_space.shape[0]
         output_dict = {'next_obs': self.base_algorithm.observation_space.sample()}
         self.ensemble_model = EnsembleMLP(
@@ -99,7 +99,8 @@ class BasePlayAlgorithm(ABC):
             output_dict=output_dict,
             **ensemble_model_kwargs,
         )
-        self._setup_normalizer(input_dim=obs_dim + act_dim, output_dict=output_dict)
+        self.ensemble_model.to(device)
+        self._setup_normalizer(input_dim=obs_dim + act_dim, output_dict=output_dict, device=device)
 
         if intrinsic_reward_weights is not None:
             assert intrinsic_reward_weights.keys() == output_dict.keys()
@@ -107,11 +108,13 @@ class BasePlayAlgorithm(ABC):
         else:
             self.intrinsic_reward_weights = {k: 1.0 for k in output_dict.keys()}
 
-    def _setup_normalizer(self, input_dim: int, output_dict: dict):
-        self.input_normalizer = Normalizer(input_dim=input_dim, update=self.normalize_ensemble_training)
+    def _setup_normalizer(self, input_dim: int, output_dict: dict, device: th.device):
+        self.input_normalizer = Normalizer(input_dim=input_dim, update=self.normalize_ensemble_training,
+                                           device=device)
         output_normalizers = {}
         for key, val in output_dict.items():
-            output_normalizers[key] = Normalizer(input_dim=val.shape[-1], update=self.normalize_ensemble_training)
+            output_normalizers[key] = Normalizer(input_dim=val.shape[-1], update=self.normalize_ensemble_training,
+                                                 device=device)
         self.output_normalizers = output_normalizers
 
     def aggregate_intrinsic_reward(self, intrinsic_rewards: th.Tensor):
@@ -369,7 +372,7 @@ class OnPolicyPlayAlgorithm(BasePlayAlgorithm):
             self.ensemble_model.optimizer.step()
 
         self.ensemble_model.eval()
-        losses = th.stack(losses).detach().numpy().mean(axis=0)
+        losses = th.stack(losses).cpu().detach().numpy().mean(axis=0)
         for index, key in enumerate(self.ensemble_model.output_dict.keys()):
             self.logger.record("train/ensemble/" + key, losses[index])
 
@@ -571,18 +574,18 @@ if __name__ == '__main__':
                                  n_eval_episodes=5, deterministic=True,
                                  render=True)
     fewshot_callback = EvalCallback(VecVideoRecorder(make_vec_env(CustomPendulumEnv, n_envs=4, seed=1,
-                                                               env_kwargs={'render_mode': 'rgb_array'},
-                                                               wrapper_class=TimeLimit,
-                                                               wrapper_kwargs={'max_episode_steps': 200}
-                                                               ),
-                                                  video_folder=log_dir + 'eval/',
-                                                  record_video_trigger=lambda x: True,
-                                                  ),
-                                 log_path=log_dir,
-                                 best_model_save_path=log_dir,
-                                 eval_freq=32,
-                                 n_eval_episodes=5, deterministic=True,
-                                 render=True)
+                                                                  env_kwargs={'render_mode': 'rgb_array'},
+                                                                  wrapper_class=TimeLimit,
+                                                                  wrapper_kwargs={'max_episode_steps': 200}
+                                                                  ),
+                                                     video_folder=log_dir + 'eval/',
+                                                     record_video_trigger=lambda x: True,
+                                                     ),
+                                    log_path=log_dir,
+                                    best_model_save_path=log_dir,
+                                    eval_freq=32,
+                                    n_eval_episodes=5, deterministic=True,
+                                    render=True)
     base_algorithm_cls = PPO
     base_algorithm_kwargs = {
         'policy': 'MlpPolicy',
