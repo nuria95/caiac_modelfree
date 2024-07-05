@@ -1,0 +1,110 @@
+import copy
+from abc import ABC
+from multimexmf.models.pretrain_models import EnsembleMLP
+from typing import Dict, Optional
+import torch
+import numpy as np
+
+
+class BaseIntrinsicReward(ABC):
+    def __init__(self, ensemble_model: EnsembleMLP, intrinsic_reward_weights: Dict, agg_intrinsic_reward: str = 'sum'):
+        self.intrinsic_reward_weights = intrinsic_reward_weights
+        self.agg_intrinsic_reward = agg_intrinsic_reward
+        self.ensemble_model = ensemble_model
+
+    def __call__(self, inp: torch.Tensor, labels: Dict):
+        raise NotImplementedError
+
+    def aggregate_intrinsic_reward(self, intrinsic_rewards: torch.Tensor):
+        if self.agg_intrinsic_reward == 'sum':
+            intrinsic_rewards = intrinsic_rewards.sum(dim=0)
+        elif self.agg_intrinsic_reward == 'max':
+            intrinsic_rewards = intrinsic_rewards.max(dim=0)
+        else:
+            raise NotImplementedError
+        return intrinsic_rewards
+
+
+class RNDIntrinsicReward(BaseIntrinsicReward):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # use a randomly initialized network to give targets
+        self.target_ensemble = copy.deepcopy(self.ensemble_model)
+
+    def __call__(self, inp: torch.Tensor, labels: Dict):
+        self.ensemble_model.eval()
+        predictions = self.ensemble_model(inp)
+        targets = self.target_ensemble(inp)
+        error = torch.stack([
+            # take mean of ensemble as prediction
+            ((predictions[key].mean(dim=-1) - y) ** 2
+             ).mean(dim=-1) * self.intrinsic_reward_weights[key]  # take mean error over the dimension of output
+            for key, y in targets.items()])
+        error = self.aggregate_intrinsic_reward(error)
+        return error
+
+
+class CuriosityIntrinsicReward(BaseIntrinsicReward):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, inp: torch.Tensor, labels: Dict):
+        self.ensemble_model.eval()
+        predictions = self.ensemble_model(inp)
+        curiosity = torch.stack([
+            # take mean of ensemble as prediction
+            ((predictions[key].mean(dim=-1) - y) ** 2
+             ).mean(dim=-1) * self.intrinsic_reward_weights[key]  # take mean error over the dimension of output
+            for key, y in labels.items()])
+        curiosity = self.aggregate_intrinsic_reward(curiosity)
+        return curiosity
+
+
+class DisagreementIntrinsicReward(BaseIntrinsicReward):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, inp: torch.Tensor, labels: Dict):
+        self.ensemble_model.eval()
+        predictions = self.ensemble_model(inp)
+        disg = self.ensemble_model.get_disagreement(predictions)
+        disg = torch.stack([val * self.intrinsic_reward_weights[key] for key, val in disg.items()])
+        disg = self.aggregate_intrinsic_reward(disg)
+        return disg
+
+
+def sigmoid_schedule(init_value: float = 0.0,
+                     point_for_pure_exploitation: float = 0.75,
+                     slope: float = 20,
+                     ):
+    """
+
+    :param init_value: initial value for exploration, if 0.0 -> equal exploration and exploitation is done
+    :param point_for_pure_exploitation: point of progress after which exploration_weight gets nearly 0
+    :return:
+    """
+    assert point_for_pure_exploitation < 1
+    max_value = 100
+
+    # progress is 1 at the beginning and 0 at the end
+    def exploration_weight(progress: float):
+        # value is min_value when progress is 1 and 0 when point_for_equal_weight is reached
+        value = - slope * (progress - 1) + init_value
+        if progress <= point_for_pure_exploitation:
+            value = max_value
+        # when value is small --> we get nearly 1 and when value gets big we get 0.
+        return 1 / (1 + np.exp(value))
+
+    return exploration_weight
+
+
+def explore_till(
+        exploration_till_progress: float = 0.75,
+):
+    def exploration_weight(progress: float):
+        if progress > exploration_till_progress:
+            return 1.0
+        else:
+            return 0.0
+    return exploration_weight
