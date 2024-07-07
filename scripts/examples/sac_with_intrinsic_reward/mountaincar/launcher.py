@@ -5,20 +5,26 @@ import argparse
 PROJECT_NAME = 'MCTest-06April_longer_run'
 
 _applicable_configs = {
-    'alg': ['SAC', 'Random', 'Curiosity', 'Disagreement'],
     'total_steps': [100_000],
     'num_envs': [8],
     'normalize': [0],
     'record_video': [0],
     'ensemble_lr': [3e-4],
     'ensemble_wd': [1e-4],
-    'exploration_freq': [0.75, 0.5, 0.25],
     'seed': list(range(5)),
     'project_name': [PROJECT_NAME]
 }
 
+_applicable_configs_random = {'alg': ['Random'], 'exploitation_switch_at': [0.75, 0.5, 0.25]} | _applicable_configs
+_applicable_configs_curiosity = {'alg': ['Curiosity'], 'exploitation_switch_at': [0.75, 0.5, 0.25]} | _applicable_configs
+_applicable_configs_disagreement = {'alg': ['Disagreement'],
+                                    'exploitation_switch_at': [0.75, 0.5, 0.25]} | _applicable_configs
+_applicable_configs_sac = {'alg': ['SAC'], 'exploitation_switch_at': [0.75]} | _applicable_configs
 
-all_flags_combinations = dict_permutations(_applicable_configs)
+all_flags_combinations = dict_permutations(_applicable_configs_sac) + \
+                         dict_permutations(_applicable_configs_disagreement) + \
+                         dict_permutations(_applicable_configs_curiosity) + \
+                         dict_permutations(_applicable_configs_random)
 
 
 def main(args):
