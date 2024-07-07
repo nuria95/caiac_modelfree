@@ -13,6 +13,8 @@ import os
 import sys
 import argparse
 from experiments.utils import Logger, hash_dict
+from gymnasium.envs.classic_control.pendulum import PendulumEnv
+from typing import Optional
 
 
 def experiment(
@@ -52,13 +54,39 @@ def experiment(
     record_video = record_video
     normalize = normalize
 
-    vec_env = make_vec_env('MountainCarContinuous-v0', n_envs=num_envs, seed=0, wrapper_class=TimeLimit,
+    class CustomPendulumEnv(PendulumEnv):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._step = 0
+            self.max_step = 200
+            self.action_cost = 0.5
+
+        def step(self, u):
+            obs, reward, terminate, truncate, info = super().step(u)
+            self._step += 1
+            if self._step >= self.max_step:
+                terminate = True
+            reward = reward - self.action_cost * (u ** 2)
+            return obs, reward, terminate, truncate, info
+
+        def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+            super().reset(seed=seed)
+            default_state = np.array([np.pi, 0.0])
+            high = np.ones_like(default_state) * 0.1
+            self.state = self.np_random.uniform(low=-high, high=high) + default_state
+            self.last_u = None
+            self._step = 0
+            if self.render_mode == "human":
+                self.render()
+            return self._get_obs(), {}
+
+    vec_env = make_vec_env(CustomPendulumEnv, n_envs=num_envs, seed=seed, wrapper_class=TimeLimit,
                            env_kwargs={'render_mode': 'rgb_array'},
-                           wrapper_kwargs={'max_episode_steps': 1_000})
-    eval_env = make_vec_env('MountainCarContinuous-v0', n_envs=4, seed=1,
+                           wrapper_kwargs={'max_episode_steps': 200})
+    eval_env = make_vec_env(CustomPendulumEnv, n_envs=4, seed=seed + 1000,
                             env_kwargs={'render_mode': 'rgb_array'},
                             wrapper_class=TimeLimit,
-                            wrapper_kwargs={'max_episode_steps': 1_000}
+                            wrapper_kwargs={'max_episode_steps': 200}
                             )
     if normalize:
         vec_env = VecNormalize(venv=vec_env)
@@ -107,7 +135,7 @@ def experiment(
         # 'gradient_steps': 32,
         'learning_rate': 1e-3,
         'verbose': 1,
-        'tensorboard_log': './logs/'
+        'tensorboard_log': f"{tb_dir}/{run.id}"
     }
 
     ensemble_model_kwargs = {
@@ -182,7 +210,7 @@ if __name__ == '__main__':
 
     # general experiment args
     parser.add_argument('--logs_dir', type=str, default='./logs/')
-    parser.add_argument('--project_name', type=str, default='MCTest')
+    parser.add_argument('--project_name', type=str, default='PendTest')
     parser.add_argument('--alg', type=str, default='SAC')
     parser.add_argument('--total_steps', type=int, default=75_000)
     parser.add_argument('--num_envs', type=int, default=8)

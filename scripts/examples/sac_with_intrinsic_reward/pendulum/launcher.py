@@ -1,5 +1,5 @@
 from experiments.utils import generate_run_commands, generate_base_command, dict_permutations
-from scripts.examples import mountaincar_play as exp
+from scripts.examples.sac_with_intrinsic_reward.pendulum import pendulum_sac as exp
 import argparse
 
 PROJECT_NAME = 'MCTest-06April_longer_run'
@@ -23,7 +23,7 @@ all_flags_combinations = dict_permutations(_applicable_configs)
 
 def main(args):
     command_list = []
-    logs_dir = './'
+    logs_dir = '../'
     if args.mode == 'euler':
         logs_dir = '/cluster/scratch/'
         logs_dir += 'sukhijab' + '/' + PROJECT_NAME + '/'
