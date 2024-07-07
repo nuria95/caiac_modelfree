@@ -109,6 +109,7 @@ class Normalizer:
         std = th.sqrt(new_var)
         self.mean = mean
         self.std = torch.clamp(std, min=EPS)
+        self.num_points = total_points
 
     def normalize(self, x: th.Tensor):
         return (x - self.mean) / self.std
