@@ -1,7 +1,7 @@
 import copy
 from abc import ABC
 from multimexmf.models.pretrain_models import EnsembleMLP
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import torch
 import numpy as np
 
@@ -108,3 +108,28 @@ def explore_till(
         else:
             return 0.0
     return exploration_weight
+
+
+def exploration_frequency_schedule(
+        thressholds: Optional[List[List]] = None,
+):
+    if thressholds is not None:
+        thressholds = sorted(thressholds, reverse=True)
+    else:
+        return 1_000_000
+
+    # example: thressholds = [[1 1], [0.75, 2], [0.5, 5], [0.25, 100]]
+    def exploration_freq(progress: float):
+        # progress starts at 1 and goes to 0.
+        current_freq = 1_000_000
+        for thresshold in thressholds:
+            # if progress = 1 -> returns 1 till progress is <= 0.75
+            if progress <= thresshold[0]:
+                current_freq = thresshold[1]
+            else:
+                return current_freq
+        return current_freq
+    return exploration_freq
+
+
+
