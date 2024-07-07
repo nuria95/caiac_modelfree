@@ -38,6 +38,7 @@ def experiment(
         record_video=record_video,
         ensemble_lr=ensemble_lr,
         ensemble_wd=ensemble_wd,
+        exploitation_switch_at=exploitation_switch_at,
     )
 
     # wandb.tensorboard.patch(root_logdir=tb_dir)
@@ -173,6 +174,7 @@ def main(args):
         record_video=bool(args.record_video),
         ensemble_lr=args.ensemble_lr,
         ensemble_wd=args.ensemble_wd,
+        exploitation_switch_at=args.exploitation_switch_at,
         seed=args.seed,
     )
 
