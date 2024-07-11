@@ -4,6 +4,7 @@ from setuptools import setup, find_packages
 
 required = [
     'M3L @ git+https://github.com/sukhijab/M3L.git',
+    'dm_control',
 ]
 
 

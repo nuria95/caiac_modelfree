@@ -30,14 +30,24 @@ def tie_weights(src, trg):
 # Most implementation is taken from: https://github.com/denisyarats/pytorch_sac_ae/tree/master
 
 
-def preprocess_obs(obs, bits=5):
+def preprocess_obs(obs, bits=5, inverse: bool = False):
     """Preprocessing image, see https://arxiv.org/abs/1807.03039."""
     bins = 2 ** bits
-    if bits < 8:
-        obs = torch.floor(obs / 2 ** (8 - bits))
-    obs = obs / bins
-    obs = obs + torch.rand_like(obs) / bins
-    obs = obs - 0.5
+    if inverse:
+        obs = torch.clip(obs, min=-0.5, max=0.5)
+        obs = obs + 0.5
+        obs = obs * bins
+        if bits < 8:
+            obs = obs * (2 ** (8 - bits))
+        obs = torch.round(obs)
+        obs = obs.type(torch.uint8)
+        return obs
+    else:
+        if bits < 8:
+            obs = torch.floor(obs / 2 ** (8 - bits))
+        obs = obs / bins
+        obs = obs + torch.rand_like(obs) / bins
+        obs = obs - 0.5
     return obs
 
 
