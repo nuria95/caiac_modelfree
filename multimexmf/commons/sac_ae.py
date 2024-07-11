@@ -1,27 +1,35 @@
 import collections
 
-from multimexmf.models.encoder_decoder_models import SACAEPolicy
+from multimexmf.models.encoder_decoder_models import SACAEPolicy, preprocess_obs
 from stable_baselines3.sac import SAC
-from typing import Type, Dict
+from typing import Type, Union
 import torch as th
-from stable_baselines3.common.type_aliases import MaybeCallback
-from stable_baselines3.common.utils import polyak_update
+from stable_baselines3.common.type_aliases import MaybeCallback, Schedule, TrainFreq
+from stable_baselines3.common.utils import polyak_update, get_schedule_fn, update_learning_rate
 import numpy as np
 from torch.nn import functional as F
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.buffers import DictReplayBuffer
+from stable_baselines3.common.logger import Image
 
 
 class SACAE(SAC):
     def __init__(self,
                  encoder_tau: float = 0.02,
                  decoder_latent_loss_weight: float = 0.0,
+                 train_decoder_with_next_obs: bool = True,
+                 learning_rate_encoder: Union[float, Schedule] = 1e-3,
+                 image_logging_freq: int = 1_000,
                  policy: Type[SACAEPolicy] = SACAEPolicy,
                  *args,
                  **kwargs,
                  ):
+        self.learning_rate_encoder = learning_rate_encoder
         self.encoder_tau = encoder_tau
         self.decoder_latent_loss_weight = decoder_latent_loss_weight
+        self.train_decoder_with_next_obs = train_decoder_with_next_obs
+        self.image_logging_freq = image_logging_freq
+        self.log_image = True
         super().__init__(policy=policy, *args, **kwargs)
         assert isinstance(self.replay_buffer, DictReplayBuffer)
         assert isinstance(self.policy, SACAEPolicy)
@@ -35,6 +43,16 @@ class SACAE(SAC):
     def encode_observation(self, observation: TensorDict, detach: bool = True, target: bool = False):
         return self.policy.encode_observation(observation, detach, target=target)
 
+    def _setup_lr_schedule(self) -> None:
+        """Transform to callable if needed."""
+        self.lr_schedule = get_schedule_fn(self.learning_rate)
+        self.lr_schedule_encoder = get_schedule_fn(self.learning_rate_encoder)
+
+    def _update_encoder_learning_rate(self) -> None:
+        self.logger.record("train/encoder_learning_rate", self.lr_schedule_encoder(self._current_progress_remaining))
+        update_learning_rate(self.policy.encoder_optimizer,
+                             self.lr_schedule_encoder(self._current_progress_remaining))
+
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
@@ -43,11 +61,10 @@ class SACAE(SAC):
         if self.ent_coef_optimizer is not None:
             optimizers += [self.ent_coef_optimizer]
 
-        if self.has_encoder:
-            optimizers += [self.policy.encoder_optimizer]
-
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
+        if self.has_encoder:
+            self._update_encoder_learning_rate()
 
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
@@ -146,7 +163,7 @@ class SACAE(SAC):
             # decoder training
             if self.has_encoder:
                 self.policy.encoder_optimizer.zero_grad()
-                # Get latent embedding for the state
+                # Get latent embedding for the state -> add next_obs to the data as well
                 state = self.encode_observation(observation=replay_data.observations, detach=False, target=False)
                 # decode the state and evaluate reconstruction error for the AE
                 decoded_state = self.policy.decode(state)
@@ -154,6 +171,17 @@ class SACAE(SAC):
                                                                target=replay_data.observations)
                 stacked_losses = th.stack([val for val in decoder_loss.values()])
                 recon_loss = stacked_losses.mean()
+                if self.train_decoder_with_next_obs:
+                    next_state = self.encode_observation(observation=replay_data.next_observations,
+                                                         detach=False, target=False)
+                    # decode the state and evaluate reconstruction error for the AE
+                    decoded_next_state = self.policy.decode(next_state)
+                    decoder_next_state_loss = self.policy.reconstruction_loss(prediction=decoded_next_state,
+                                                                              target=replay_data.next_observations)
+                    stacked_losses = th.stack([val for val in decoder_next_state_loss.values()])
+                    recon_loss += stacked_losses.mean()
+
+
                 latent_loss = (0.5 * state.pow(2).sum(1)).mean()
                 total_loss = recon_loss + self.decoder_latent_loss_weight * latent_loss
                 total_loss.backward()
@@ -161,6 +189,19 @@ class SACAE(SAC):
                 for key, val in decoder_loss.items():
                     decoder_losses[f"{key}_rc_loss"].append(val.item())
                 decoder_losses['latent_loss'].append(latent_loss.item())
+                if gradient_step == gradient_steps - 1 and self.log_image:
+                    if self.policy.img_encoder is not None:
+                        img_shape = replay_data.observations[self.policy.image_key][0].shape
+                        n_frame = img_shape[0] // 3  # we use 3 channels
+                        final_shape = (n_frame, 3) + img_shape[1:]
+                        self.logger.record("train/true_image", Image(
+                            replay_data.observations[self.policy.image_key][0].reshape(final_shape), "NCHW"),
+                                           exclude=("stdout", "log", "json", "csv"))
+
+                        reconstructed_image = decoded_state[self.policy.image_key][0].reshape(final_shape)
+                        reconstructed_image = preprocess_obs(reconstructed_image, inverse=True)
+                        self.logger.record("train/reconstructed_image", Image(reconstructed_image, "NCHW"),
+                                           exclude=("stdout", "log", "json", "csv"))
 
         self._n_updates += gradient_steps
 
@@ -183,38 +224,61 @@ class SACAE(SAC):
             reset_num_timesteps: bool = True,
             progress_bar: bool = False,
     ):
-        return super().learn(
-            total_timesteps=total_timesteps,
-            callback=callback,
-            log_interval=log_interval,
-            tb_log_name=tb_log_name,
-            reset_num_timesteps=reset_num_timesteps,
-            progress_bar=progress_bar,
+        total_timesteps, callback = self._setup_learn(
+            total_timesteps,
+            callback,
+            reset_num_timesteps,
+            tb_log_name,
+            progress_bar,
         )
+
+        callback.on_training_start(locals(), globals())
+
+        assert self.env is not None, "You must set the environment before calling learn()"
+        assert isinstance(self.train_freq, TrainFreq)  # check done in _setup_learn()
+
+        model_updates = 0
+        while self.num_timesteps < total_timesteps:
+            rollout = self.collect_rollouts(
+                self.env,
+                train_freq=self.train_freq,
+                action_noise=self.action_noise,
+                callback=callback,
+                learning_starts=self.learning_starts,
+                replay_buffer=self.replay_buffer,
+                log_interval=log_interval,
+            )
+
+            if not rollout.continue_training:
+                break
+
+            if self.num_timesteps > 0 and self.num_timesteps > self.learning_starts:
+                # If no `gradient_steps` is specified,
+                # do as many gradients steps as steps performed during the rollout
+                gradient_steps = self.gradient_steps if self.gradient_steps >= 0 else rollout.episode_timesteps
+                # Special case when the user passes `gradient_steps=0`
+                self.log_image = model_updates % self.image_logging_freq == 0
+                if gradient_steps > 0:
+                    self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+                model_updates += gradient_steps
+
+        callback.on_training_end()
+
+        return self
 
 
 if __name__ == '__main__':
     from stable_baselines3.common.env_util import make_vec_env
     from gymnasium.wrappers.time_limit import TimeLimit
-    from gymnasium.envs.mujoco.reacher_v4 import ReacherEnv
+    from gymnasium.envs.mujoco.half_cheetah_v4 import HalfCheetahEnv
     from gymnasium.wrappers.pixel_observation import PixelObservationWrapper
     from stable_baselines3.common.vec_env.vec_frame_stack import VecFrameStack
 
-    class ReacherEnvWithCost(ReacherEnv):
-        def __init__(self, ctrl_cost_weight: float = 1.0, width: int = 128, height: int = 128, *args, **kwargs):
-            super().__init__(width=width, height=height, *args, **kwargs)
-            self.ctrl_cost_weight = ctrl_cost_weight
-
-        def step(self, a):
-            obs, reward, terminate, truncate, info = super().step(a)
-            reward_dist = info['reward_dist']
-            reward_ctrl = info['reward_ctrl']
-            reward = reward_dist + self.ctrl_cost_weight * reward_ctrl
-            return obs, reward, terminate, truncate, info
 
 
-    env = lambda: PixelObservationWrapper(TimeLimit(ReacherEnvWithCost(render_mode='rgb_array',
-                                                                       ), max_episode_steps=50))
+
+    env = lambda: PixelObservationWrapper(TimeLimit(HalfCheetahEnv(render_mode='rgb_array',
+                                                                       ), max_episode_steps=1_000))
     print('using image observation')
 
     vec_env = VecFrameStack(make_vec_env(env, n_envs=4, seed=0), n_stack=3)
