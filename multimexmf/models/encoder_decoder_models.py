@@ -251,6 +251,7 @@ class SACAEPolicy(SACPolicy):
             normalize_images: bool = True,
             optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
             optimizer_kwargs: Optional[Dict[str, Any]] = None,
+            encoder_optimizer_kwargs: Optional[Dict[str, Any]] = None,
             n_critics: int = 2,
             share_features_extractor: bool = False,
             encoder_feature_dim: int = 256,
@@ -280,6 +281,12 @@ class SACAEPolicy(SACPolicy):
             high=np.ones(state_dim) * np.inf,
         )
         self.full_observation_space = observation_space
+        if encoder_optimizer_kwargs is None:
+            encoder_optimizer_kwargs = {}
+            # Small values to avoid NaN in Adam optimizer
+            if encoder_optimizer_kwargs == torch.optim.Adam:
+                encoder_optimizer_kwargs["eps"] = 1e-5
+        self.encoder_optimizer_kwargs = encoder_optimizer_kwargs
         super().__init__(
             observation_space=feature_space,
             action_space=action_space,
@@ -446,7 +453,7 @@ class SACAEPolicy(SACPolicy):
             self.encoder_optimizer = self.optimizer_class(
                 encoder_params,
                 lr=lr_schedule(1),
-                **self.optimizer_kwargs,
+                **self.encoder_optimizer_kwargs,
             )
 
     def set_training_mode(self, mode: bool) -> None:
