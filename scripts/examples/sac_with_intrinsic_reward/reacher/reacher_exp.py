@@ -13,8 +13,7 @@ import os
 import sys
 import argparse
 from experiments.utils import Logger, hash_dict
-from gymnasium.envs.classic_control.pendulum import PendulumEnv
-from typing import Optional
+
 
 
 def experiment(
@@ -30,6 +29,7 @@ def experiment(
         exploitation_switch_at: float = 0.25,
         seed: int = 0,
 ):
+    from multimexmf.envs.dm2gym import DMCGym
     tb_dir = logs_dir + 'runs'
 
     config = dict(
@@ -53,46 +53,15 @@ def experiment(
         config=config,
     )
     record_video = record_video
-    normalize = normalize
 
-    class CustomPendulumEnv(PendulumEnv):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._step = 0
-            self.max_step = 200
-            self.action_cost = 0.5
+    env = lambda: TimeLimit(DMCGym(
+        domain='reacher',
+        task='hard',
+        render_mode='rgb_array',
+    ), max_episode_steps=50)
 
-        def step(self, u):
-            obs, reward, terminate, truncate, info = super().step(u)
-            self._step += 1
-            if self._step >= self.max_step:
-                terminate = True
-            u = np.clip(u, -self.max_torque, self.max_torque)[0]
-            reward = reward - self.action_cost * (u ** 2)
-            return obs, reward, terminate, truncate, info
-
-        def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
-            super().reset(seed=seed)
-            default_state = np.array([np.pi, 0.0])
-            high = np.ones_like(default_state) * 0.1
-            self.state = self.np_random.uniform(low=-high, high=high) + default_state
-            self.last_u = None
-            self._step = 0
-            if self.render_mode == "human":
-                self.render()
-            return self._get_obs(), {}
-
-    vec_env = make_vec_env(CustomPendulumEnv, n_envs=num_envs, seed=seed, wrapper_class=TimeLimit,
-                           env_kwargs={'render_mode': 'rgb_array'},
-                           wrapper_kwargs={'max_episode_steps': 200})
-    eval_env = make_vec_env(CustomPendulumEnv, n_envs=4, seed=seed + 1000,
-                            env_kwargs={'render_mode': 'rgb_array'},
-                            wrapper_class=TimeLimit,
-                            wrapper_kwargs={'max_episode_steps': 200}
-                            )
-    if normalize:
-        vec_env = VecNormalize(venv=vec_env)
-        eval_env = VecNormalize(venv=eval_env)
+    vec_env = make_vec_env(env, n_envs=num_envs, seed=seed)
+    eval_env = make_vec_env(env, n_envs=num_envs, seed=seed + 1_000)
 
     if record_video:
         callback = EvalCallback(VecVideoRecorder(eval_env,
@@ -109,35 +78,18 @@ def experiment(
         callback = EvalCallback(eval_env,
                                 log_path=logs_dir,
                                 best_model_save_path=logs_dir,
-                                eval_freq=200,
+                                eval_freq=1000,
                                 n_eval_episodes=5,
                                 deterministic=True,
                                 render=False
                                 )
-
-    # algorithm_kwargs = {
-    #     'learning_rate': 1e-3,
-    #     'buffer_size': 500_000,
-    #     'batch_size': 512,
-    #     # 'ent_coef': 0.1,
-    #     'train_freq': 1,
-    #     'gradient_steps': 1,
-    #     'tau': 0.01,
-    #     'learning_starts': 0,
-    #     # 'policy_kwargs': {'log_std_init': -3.67, 'net_arch': [64, 64]},
-    #     'policy': 'MlpPolicy',
-    #     'verbose': 1,
-    #     'gamma': 0.9999,
-    #     'tensorboard_log': f"{tb_dir}/{run.id}"
-    # }
-
     algorithm_kwargs = {
         'policy': 'MlpPolicy',
         # 'train_freq': 32,
         # 'gradient_steps': 32,
         'learning_rate': 1e-3,
         'verbose': 1,
-        'tensorboard_log': f"{tb_dir}/{run.id}"
+        'tensorboard_log': f"{tb_dir}/{run.id}",
     }
 
     ensemble_model_kwargs = {
@@ -213,12 +165,12 @@ if __name__ == '__main__':
 
     # general experiment args
     parser.add_argument('--logs_dir', type=str, default='./logs/')
-    parser.add_argument('--project_name', type=str, default='PendTest')
+    parser.add_argument('--project_name', type=str, default='MCTest')
     parser.add_argument('--alg', type=str, default='SAC')
     parser.add_argument('--total_steps', type=int, default=75_000)
     parser.add_argument('--num_envs', type=int, default=8)
     parser.add_argument('--normalize', type=int, default=0)
-    parser.add_argument('--record_video', type=int, default=0)
+    parser.add_argument('--record_video', type=int, default=1)
     parser.add_argument('--ensemble_lr', type=float, default=3e-4)
     parser.add_argument('--ensemble_wd', type=float, default=1e-4)
     parser.add_argument('--exploitation_switch_at', type=float, default=0.25)

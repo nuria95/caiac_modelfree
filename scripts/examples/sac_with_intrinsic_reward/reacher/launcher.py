@@ -1,14 +1,14 @@
 from experiments.utils import generate_run_commands, generate_base_command, dict_permutations
-from scripts.examples.sac_with_intrinsic_reward.pendulum import pendulum_sac as exp
+from scripts.examples.sac_with_intrinsic_reward.reacher import reacher_exp as exp
 import argparse
 
-PROJECT_NAME = 'Pend11Jul'
+PROJECT_NAME = 'Reacher11Jul'
 
 _applicable_configs = {
     'total_steps': [100_000],
     'num_envs': [8],
     'normalize': [0],
-    'record_video': [0],
+    'record_video': [1],
     'ensemble_lr': [3e-4],
     'ensemble_wd': [1e-4],
     'seed': list(range(5)),
@@ -25,7 +25,6 @@ all_flags_combinations = dict_permutations(_applicable_configs_sac) + \
                          dict_permutations(_applicable_configs_disagreement) + \
                          dict_permutations(_applicable_configs_curiosity) + \
                          dict_permutations(_applicable_configs_random)
-
 
 def main(args):
     command_list = []
