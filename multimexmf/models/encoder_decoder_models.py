@@ -25,6 +25,16 @@ def tie_weights(src, trg):
     trg.bias = src.bias
 
 
+def weight_init(m):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight.data)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.orthogonal_(m.weight.data, gain)
+        if hasattr(m.bias, 'data'):
+            m.bias.data.fill_(0.0)
 # OUT_DIM = {2: 39, 4: 35, 6: 31}
 
 # Most implementation is taken from: https://github.com/denisyarats/pytorch_sac_ae/tree/master
@@ -325,6 +335,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.img_encoder.apply(weight_init)
             self.target_img_encoder = make_encoder(
                 encoder_type='pixel',
                 dummy_obs=sample_obs['pixels'],
@@ -342,6 +353,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.img_decoder.apply(weight_init)
 
         elif 'pixels' in obs_space_keys:
             self.image_key = 'pixels'
@@ -354,6 +366,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.img_encoder.apply(weight_init)
             self.target_img_encoder = make_encoder(
                 encoder_type='pixel',
                 dummy_obs=sample_obs['pixels'],
@@ -371,6 +384,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.img_decoder.apply(weight_init)
         else:
             self.img_encoder = None
             self.image_key = None
@@ -386,6 +400,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.tactile_encoder.apply(weight_init)
             self.target_tactile_encoder = make_encoder(
                 encoder_type='pixel',
                 dummy_obs=sample_obs['tactile'],
@@ -403,6 +418,7 @@ class SACAEPolicy(SACPolicy):
                 num_layers=num_encoder_layers,
                 num_filters=num_encoder_filters,
             )
+            self.tactile_decoder.apply(weight_init)
         else:
             self.tactile_encoder = None
             self.tactile_decoder = None
@@ -418,6 +434,7 @@ class SACAEPolicy(SACPolicy):
                 nn.ReLU(),
                 nn.Linear(encoder_feature_dim * 2, encoder_feature_dim)
             )
+            self.img_tactile_module.apply(weight_init)
             self.target_img_tactile_module = nn.Sequential(
                 nn.Linear(encoder_feature_dim * 2, encoder_feature_dim * 2),
                 nn.ReLU(),

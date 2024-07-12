@@ -5,7 +5,6 @@ import torch.nn as nn
 from typing import Tuple, Dict, Optional, Type, Any, Union
 from stable_baselines3.common.utils import get_device
 
-
 EPS = 1e-6
 
 
@@ -79,6 +78,7 @@ class VTMAE(M3LVTMAE):
             'tactile': tactile_tokens,
         }
         return self.aggregate_patches(embeddings)
+
 
 class Normalizer:
     def __init__(self, input_dim: int, update: bool = True, device: Union[th.device, str] = "auto"):
