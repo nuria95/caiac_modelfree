@@ -138,7 +138,7 @@ class DrQActor(Actor):
         super().__init__(*args, **kwargs)
         self.apply(weight_init)
 
-    def extract_features(self, obs: PyTorchObs, features_extractor: BaseFeaturesExtractor) -> th.Tensor:
+    def extract_features(self, obs: PyTorchObs, features_extractor: BaseFeaturesExtractor = None) -> th.Tensor:
         return self.features_extractor(obs)
 
 
@@ -147,7 +147,7 @@ class DrQCritic(ContinuousCritic):
         super().__init__(*args, **kwargs)
         self.apply(weight_init)
 
-    def extract_features(self, obs: PyTorchObs, features_extractor: BaseFeaturesExtractor) -> th.Tensor:
+    def extract_features(self, obs: PyTorchObs, features_extractor: BaseFeaturesExtractor = None) -> th.Tensor:
         return self.features_extractor(obs)
 
 
