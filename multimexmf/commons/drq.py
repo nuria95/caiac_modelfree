@@ -128,7 +128,7 @@ class Trunk(BaseFeaturesExtractor):
         latent = self.trunk(observations)
         if self.has_state:
             # State has to be stored towards the end of the embedding
-            state = observations[..., :-self.state_dim]
+            state = observations[..., -self.state_dim:]
             latent = torch.cat([latent, state], dim=-1)
         return latent
 
