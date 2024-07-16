@@ -12,7 +12,6 @@ import os
 import sys
 import argparse
 from experiments.utils import Logger, hash_dict
-from dm_control.suite.cartpole import Physics
 
 
 def experiment(
@@ -27,7 +26,7 @@ def experiment(
         ensemble_wd: float = 1e-4,
         exploitation_switch_at: float = 0.25,
         init_exploration_freq: int = 2,
-        task: str = 'hard',
+        task: str = 'swingup_sparse',
         action_cost: float = 0.25,
         seed: int = 0,
 ):
@@ -64,7 +63,7 @@ def experiment(
     env = lambda: TimeLimit(
         ActionRepeat(
             ActionCost(DMCGym(
-                domain='swimmer',
+                domain='cartpole',
                 task=task,
                 render_mode='rgb_array',
             ),
@@ -82,7 +81,7 @@ def experiment(
                                                  ),
                                 log_path=logs_dir,
                                 best_model_save_path=logs_dir,
-                                eval_freq=10_000,
+                                eval_freq=5_000,
                                 n_eval_episodes=5,
                                 deterministic=True,
                                 render=True)
@@ -90,7 +89,7 @@ def experiment(
         callback = EvalCallback(eval_env,
                                 log_path=logs_dir,
                                 best_model_save_path=logs_dir,
-                                eval_freq=10_000,
+                                eval_freq=5_000,
                                 n_eval_episodes=5,
                                 deterministic=True,
                                 render=False
@@ -190,7 +189,7 @@ if __name__ == '__main__':
     parser.add_argument('--ensemble_wd', type=float, default=1e-4)
     parser.add_argument('--exploitation_switch_at', type=float, default=0.25)
     parser.add_argument('--init_exploration_freq', type=float, default=4)
-    parser.add_argument('--task', type=str, default='hard')
+    parser.add_argument('--task', type=str, default='swingup_sparse')
     parser.add_argument('--action_cost', type=float, default=0.25)
     parser.add_argument('--seed', type=int, default=0)
 
