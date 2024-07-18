@@ -1,3 +1,4 @@
+import torch
 from stable_baselines3.common.buffers import RolloutBuffer, DictRolloutBuffer, DictReplayBuffer, \
     DictReplayBufferSamples
 from stable_baselines3.common.type_aliases import TensorDict, ReplayBufferSamples
@@ -335,37 +336,44 @@ class NStepDictReplayBuffer(DictReplayBuffer):
         reward = self.rewards[batch_inds, env_indices]
         done = self.dones[batch_inds, env_indices]
         timeout = self.timeouts[batch_inds, env_indices]
-        gamma = np.ones_like(done)
+        gamma = np.ones_like(done, dtype=reward.dtype)
+        # can only sample till pos - 1, after that the data is either empty or from another trajectory
+        stopping_criteria = 1 - (1 - done) * (1 - (batch_inds == self.pos - 1))
+        stopping_criteria = stopping_criteria.astype(reward.dtype)
         for idx in range(1, n_steps):
-            reward = reward * done + (1 - done) * (reward + self.gamma
-                                                   * gamma * self.rewards[batch_inds + idx, env_indices])
-            timeout = timeout * done + (1 - done) * self.timeouts[batch_inds + idx, env_indices]
-            gamma = gamma * (done + (1 - done) * self.gamma)
-            next_obs_ = \
-                {key: done.reshape((-1, )
-                                   + (1,) * len(next_obs_[key].shape[1:])) * next_obs_[key]
-                      + (1 - done.reshape((-1, )
-                                   + (1,) * len(next_obs_[key].shape[1:]))) * obs[batch_inds + idx, env_indices, :]
-                 for key, obs in self.next_observations.items()}
-            done = done * done + (1 - done) * self.dones[batch_inds + idx, env_indices]
+            current_idx = (batch_inds + idx) % self.buffer_size
 
+            reward = reward * stopping_criteria + (1 - stopping_criteria) * (reward + self.gamma
+                                                   * gamma * self.rewards[current_idx, env_indices])
+            timeout = timeout * stopping_criteria + (1 - stopping_criteria) * self.timeouts[current_idx, env_indices]
+            gamma = gamma * stopping_criteria + (1 - stopping_criteria) * gamma * self.gamma
+            next_obs_ = \
+                {key: stopping_criteria.reshape((-1, )
+                                   + (1,) * len(next_obs_[key].shape[1:])) * next_obs_[key]
+                      + (1 - stopping_criteria.reshape((-1, )
+                                   + (1,) * len(next_obs_[key].shape[1:]))) * obs[current_idx, env_indices, :]
+                 for key, obs in self.next_observations.items()}
+
+            done = done * stopping_criteria + (1 - stopping_criteria) * self.dones[current_idx, env_indices]
+            stopping_criteria = stopping_criteria * stopping_criteria + (1 - stopping_criteria) * (
+                    1 - (1 - done) * (1 - (current_idx == self.pos - 1)))
+            stopping_criteria = stopping_criteria.astype(reward.dtype)
         next_obs_ = self._normalize_obs(next_obs_, env)
         next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
 
         # termination flag
         # Only use dones that are not due to timeouts
         # deactivated by default (timeouts is initialized as an array of False)
-        dones = self.to_torch(
-                done * (1 - timeout)).reshape(
-                -1, 1
-            )
+        dones = done * (1 - timeout)
+        # add relevant discounting --> 1 - done = \gamma^n if done = False
+        dones = 1 - (1 - dones) * gamma
+        dones = self.to_torch(dones.reshape(-1, 1))
         # discount factor correction
-        not_dones = (1 - dones) * gamma.reshape(-1, 1)
         return DictReplayBufferSamples(
             observations=observations,
             actions=self.to_torch(self.actions[batch_inds, env_indices]),
             next_observations=next_observations,
-            dones=1 - not_dones,
+            dones=dones,
             rewards=self.to_torch(self._normalize_reward(reward.reshape(-1, 1), env)),
         )
 
@@ -375,10 +383,6 @@ class NStepDictReplayBuffer(DictReplayBuffer):
                n_steps: int = 1,
                ):
         upper_bound = self.buffer_size if self.full else self.pos
-        if upper_bound - n_steps > 0:
-            upper_bound = upper_bound - n_steps
-        else:
-            n_steps = 1
         batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         return self._get_samples(batch_inds, env=env, n_steps=n_steps)
 
@@ -554,11 +558,17 @@ if __name__ == '__main__':
     done = dones[0]
     reward = rewards[0]
     first_done = np.where(dones == 1)[0][0]
-    print(first_done, targ_gamma ** first_done, np.cumsum(rewards[:first_done + 1])[-1])
+    stop_int = np.random.randint(low=0, high=50)
+    first_done = min(first_done, stop_int)
+    i = 0
+    stopping_criteria = 1 - (1 - done) * (1 - (i == stop_int))
+    print(first_done, stop_int, targ_gamma ** first_done, np.cumsum(rewards[:first_done + 1])[-1])
     for i in range(1, 50):
-        gamma *= (done + (1 - done) * targ_gamma)
-        reward = reward * done + (1-done) * (reward + rewards[i])
-        done = done * done + (1 - done) * dones[i]
+        gamma = gamma * (stopping_criteria + (1 - stopping_criteria) * targ_gamma)
+        reward = reward * stopping_criteria + (1-stopping_criteria) * (reward + rewards[i])
+        done = done * stopping_criteria + (1 - stopping_criteria) * dones[i]
+        stopping_criteria = stopping_criteria * stopping_criteria + (1-stopping_criteria) * \
+                            (1 - (1 - done) * (1 - (i == stop_int)))
         print(i, done, gamma, reward)
 
 
