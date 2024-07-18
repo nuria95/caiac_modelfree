@@ -342,7 +342,10 @@ class NStepDictReplayBuffer(DictReplayBuffer):
             timeout = timeout * done + (1 - done) * self.timeouts[batch_inds + idx, env_indices]
             gamma = gamma * (done + (1 - done) * self.gamma)
             next_obs_ = \
-                {key: done.reshape(-1, 1, 1, 1) * next_obs_[key] + (1 - done.reshape(-1, 1, 1, 1)) * obs[batch_inds + idx, env_indices, :]
+                {key: done.reshape((-1, )
+                                   + (1,) * len(next_obs_[key].shape[1:])) * next_obs_[key]
+                      + (1 - done.reshape((-1, )
+                                   + (1,) * len(next_obs_[key].shape[1:]))) * obs[batch_inds + idx, env_indices, :]
                  for key, obs in self.next_observations.items()}
             done = done * done + (1 - done) * self.dones[batch_inds + idx, env_indices]
 
