@@ -259,7 +259,7 @@ class DrQv2(DDPG):
             action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
                                                    sigma=np.ones_like(sample),
                                                    final_sigma=np.ones_like(sample) * 0.1,
-                                                   max_steps=2_000_000,
+                                                   max_steps=500_000,
                                                    sigma_clip=0.3,
                                                    )
 
