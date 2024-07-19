@@ -1,3 +1,7 @@
+import copy
+
+import gymnasium
+import pytest
 import torch
 from stable_baselines3.common.buffers import RolloutBuffer, DictRolloutBuffer, DictReplayBuffer, \
     DictReplayBufferSamples
@@ -329,10 +333,9 @@ class NStepDictReplayBuffer(DictReplayBuffer):
         # Convert to torch tensor
         observations = {key: self.to_torch(obs) for key, obs in obs_.items()}
 
-        next_obs_ = {key: obs[batch_inds, env_indices, :] for key, obs in self.next_observations.items()}
+        # next_obs_ = {key: obs[batch_inds, env_indices, :] for key, obs in self.next_observations.items()}
 
         assert isinstance(obs_, dict)
-        assert isinstance(next_obs_, dict)
         reward = self.rewards[batch_inds, env_indices]
         done = self.dones[batch_inds, env_indices]
         timeout = self.timeouts[batch_inds, env_indices]
@@ -340,24 +343,37 @@ class NStepDictReplayBuffer(DictReplayBuffer):
         # can only sample till pos - 1, after that the data is either empty or from another trajectory
         stopping_criteria = 1 - (1 - done) * (1 - (batch_inds == self.pos - 1))
         stopping_criteria = stopping_criteria.astype(reward.dtype)
+
+        reward_dtype = reward.dtype
+        next_obs_idx = batch_inds
+        next_obs_idx_dtype = next_obs_idx.dtype
         for idx in range(1, n_steps):
             current_idx = (batch_inds + idx) % self.buffer_size
 
             reward = reward * stopping_criteria + (1 - stopping_criteria) * (reward + self.gamma
-                                                   * gamma * self.rewards[current_idx, env_indices])
+                                                                             * gamma * self.rewards[
+                                                                                 current_idx, env_indices])
             timeout = timeout * stopping_criteria + (1 - stopping_criteria) * self.timeouts[current_idx, env_indices]
             gamma = gamma * stopping_criteria + (1 - stopping_criteria) * gamma * self.gamma
-            next_obs_ = \
-                {key: stopping_criteria.reshape((-1, )
-                                   + (1,) * len(next_obs_[key].shape[1:])) * next_obs_[key]
-                      + (1 - stopping_criteria.reshape((-1, )
-                                   + (1,) * len(next_obs_[key].shape[1:]))) * obs[current_idx, env_indices, :]
-                 for key, obs in self.next_observations.items()}
+            # next_obs_ = \
+            #      {key: stopping_criteria.reshape((-1, )
+            #                         + (1,) * len(next_obs_[key].shape[1:])) * next_obs_[key]
+            #            + (1 - stopping_criteria.reshape((-1, )
+            #                         + (1,) * len(next_obs_[key].shape[1:]))) * obs[current_idx, env_indices, :]
+            #       for key, obs in self.next_observations.items()}
+            next_obs_idx = stopping_criteria * next_obs_idx + (1 - stopping_criteria) * current_idx
 
             done = done * stopping_criteria + (1 - stopping_criteria) * self.dones[current_idx, env_indices]
             stopping_criteria = stopping_criteria * stopping_criteria + (1 - stopping_criteria) * (
                     1 - (1 - done) * (1 - (current_idx == self.pos - 1)))
-            stopping_criteria = stopping_criteria.astype(reward.dtype)
+            # stopping_criteria = stopping_criteria.astype(reward.dtype)
+
+        reward = reward.astype(reward_dtype)
+        timeout = timeout.astype(reward_dtype)
+        gamma = gamma.astype(reward_dtype)
+        done = done.astype(reward_dtype)
+        next_obs_idx = next_obs_idx.astype(next_obs_idx_dtype)
+        next_obs_ = {key: obs[next_obs_idx, env_indices, :] for key, obs in self.next_observations.items()}
         next_obs_ = self._normalize_obs(next_obs_, env)
         next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
 
@@ -385,6 +401,7 @@ class NStepDictReplayBuffer(DictReplayBuffer):
         upper_bound = self.buffer_size if self.full else self.pos
         batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         return self._get_samples(batch_inds, env=env, n_steps=n_steps)
+
 
 #
 #         self.n_steps = n_steps
@@ -550,25 +567,63 @@ class NStepDictReplayBuffer(DictReplayBuffer):
 #         )
 
 
-if __name__ == '__main__':
-    dones = np.sort(1 * (np.random.uniform(low=0, high=1, size=(50, 1)) > 0.5), axis=0)
-    rewards = np.random.uniform(low=0, high=1, size=50)
-    targ_gamma = 0.9
-    gamma = 1
-    done = dones[0]
-    reward = rewards[0]
-    first_done = np.where(dones == 1)[0][0]
-    stop_int = np.random.randint(low=0, high=50)
-    first_done = min(first_done, stop_int)
-    i = 0
-    stopping_criteria = 1 - (1 - done) * (1 - (i == stop_int))
-    print(first_done, stop_int, targ_gamma ** first_done, np.cumsum(rewards[:first_done + 1])[-1])
-    for i in range(1, 50):
-        gamma = gamma * (stopping_criteria + (1 - stopping_criteria) * targ_gamma)
-        reward = reward * stopping_criteria + (1-stopping_criteria) * (reward + rewards[i])
-        done = done * stopping_criteria + (1 - stopping_criteria) * dones[i]
-        stopping_criteria = stopping_criteria * stopping_criteria + (1-stopping_criteria) * \
-                            (1 - (1 - done) * (1 - (i == stop_int)))
-        print(i, done, gamma, reward)
+def test_get_samples():
+    np.random.seed(42)
+    from gymnasium.spaces import Dict, Box
+    n_envs = 1
+    buffer_size = 10 * n_envs
+    observation_space = Dict(spaces={'obs': Box(-1, 1, shape=(3,))})
+    action_space = Box(-1, 1, shape=(2,))
+    replay_buffer = NStepDictReplayBuffer(buffer_size, observation_space, action_space, n_envs=n_envs)
+    # Populate the buffer with some data
+    n_envs = replay_buffer.n_envs
+    obs_space = replay_buffer.observation_space
+    act_space = replay_buffer.action_space
+    for i in range(10):
+        obs = {key: np.random.random((n_envs, ) + val.shape) for key, val in obs_space.items()}
+        action = np.random.random((n_envs, ) + act_space.shape)
+        reward = np.random.random(n_envs)
+        next_obs = obs
+        done = np.zeros(n_envs)
+        replay_buffer.add(obs=obs, next_obs=next_obs, action=action, reward=reward, done=done,
+                          infos=[{'TimeLimit.truncated': False} for _ in range(n_envs)])
 
+    # Add a terminal state
+    obs = {key: np.random.random((n_envs,) + val.shape) for key, val in obs_space.items()}
+    action = np.random.random((n_envs, ) + act_space.shape)
+    reward = np.random.random(n_envs)
+    next_obs = obs
+    done = np.ones(n_envs)
+    replay_buffer.add(obs=obs, next_obs=next_obs, action=action, reward=reward, done=done,
+                      infos=[{'TimeLimit.truncated': False} for _ in range(n_envs)])
 
+    terminal_next_obs = copy.deepcopy(next_obs)
+    # add a point from the next trajectory
+
+    obs = {key: np.random.random((n_envs,) + val.shape) for key, val in obs_space.items()}
+    action = np.random.random((n_envs,) + act_space.shape)
+    reward = np.random.random(n_envs)
+    next_obs = obs
+    done = np.zeros(n_envs)
+    replay_buffer.add(obs=obs, next_obs=next_obs, action=action, reward=reward, done=done,
+                      infos=[{'TimeLimit.truncated': False} for _ in range(n_envs)])
+
+    # Test the sampling
+    batch_inds = np.array([9, 1])
+    samples = replay_buffer._get_samples(batch_inds, n_steps=3)
+
+    assert samples.observations['obs'].shape[0] == 2
+    assert samples.actions.shape[0] == 2
+    assert samples.next_observations['obs'].shape[0] == 2
+    assert samples.dones.shape[0] == 2
+    assert samples.rewards.shape[0] == 2
+
+    # Check that the dones correctly reflect the trajectory boundary
+    assert samples.dones[0].item() == 1.0
+    assert (torch.sum(samples.next_observations['obs'][0] -
+                      torch.from_numpy(terminal_next_obs['obs']).type(torch.float32)) == 0).item()
+    assert (torch.sum(samples.next_observations['obs'][-1] -
+                      torch.from_numpy(next_obs['obs']).type(torch.float32)) == 0).item()
+
+if __name__ == "__main__":
+    test_get_samples()
