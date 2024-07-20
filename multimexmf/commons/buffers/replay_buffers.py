@@ -40,6 +40,11 @@ class DictRolloutBufferSamples(NamedTuple):
 
 class IntrinsicRewardRolloutBuffer(RolloutBuffer):
     non_episodic_intrinsic_reward: bool = True,
+    intrinsic_rewards: np.ndarray
+    intrinsic_returns: np.ndarray
+    intrinsic_values: np.ndarray
+    intrinsic_advantages: np.ndarray
+    intrinsic_reward_pos: int
 
     def __init__(
             self,
@@ -83,6 +88,7 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         self.intrinsic_returns = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.intrinsic_values = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.intrinsic_advantages = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.intrinsic_reward_pos = 0
 
     def setup_intrinsic_model_buffer(self, intrinsic_model_inp_dim: int, intrinsic_model_labels: Dict):
         self._intrinsic_model_inp_dim = intrinsic_model_inp_dim
@@ -119,7 +125,7 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         :param last_values: state value estimation for the last step (one for each env)
         :param dones: if the last step was a terminal step (one bool for each env).
         """
-
+        assert self.intrinsic_reward_pos == self.pos, "must have as many intrinsic rewards as true rewards"
         assert last_values.shape[-1] == 2, "need to return both intrinsic and extrinsic values"
 
         # Convert to numpy
@@ -159,6 +165,14 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         self.returns = self.advantages + self.values
         self.intrinsic_returns = self.intrinsic_advantages + self.intrinsic_values
 
+    def add_batch_intrinsic_rewards(self, intrinsic_reward: np.ndarray):
+        assert intrinsic_reward.shape[0] == self.pos - self.intrinsic_reward_pos, "intrinsic rewards should " \
+                                                                                      "be length as the trajectory"
+
+        indices = np.arange(0, intrinsic_reward.shape[0]) + self.intrinsic_reward_pos
+        self.intrinsic_rewards[indices] = intrinsic_reward
+        self.intrinsic_reward_pos += intrinsic_reward.shape[0]
+
     def add(
             self,
             obs: np.ndarray,
@@ -178,11 +192,11 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         :param log_prob: log probability of the action
             following the current policy.
         """
-        assert reward.shape[-1] == 2 and value.shape[-1] == 2
+        assert value.shape[-1] == 2
         if len(log_prob.shape) == 0:
             # Reshape 0-d tensor to avoid error
             log_prob = log_prob.reshape(-1, 1)
-        reward, intrinsic_reward = reward[..., 0], reward[..., -1]
+        # reward, intrinsic_reward = reward[..., 0], reward[..., -1]
         value, intrinsic_value = value[..., 0], value[..., -1]
         # Reshape needed when using multiple envs with discrete observations
         # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
@@ -195,7 +209,6 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         self.observations[self.pos] = np.array(obs)
         self.actions[self.pos] = np.array(action)
         self.rewards[self.pos] = np.array(reward)
-        self.intrinsic_rewards[self.pos] = np.array(intrinsic_reward)
         self.episode_starts[self.pos] = np.array(episode_start)
         self.values[self.pos] = value.clone().cpu().numpy()
         self.intrinsic_values[self.pos] = intrinsic_value.clone().cpu().numpy()
@@ -205,13 +218,15 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
             self.full = True
 
     def add_intrinsic_model_data(self, inp, labels):
+        size = inp.shape[0]
+        indices = np.arange(0, size) + self._intrinsic_model_pos
         for key in self._intrinsic_model_labels.keys():
             # Reshape needed when using multiple envs with discrete observations
             # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
-            self._intrinsic_model_out[key][self._intrinsic_model_pos] = labels[key].clone().cpu().numpy()
+            self._intrinsic_model_out[key][indices] = labels[key]
 
-        self._intrinsic_model_inp[self._intrinsic_model_pos] = inp.clone().cpu().numpy()
-        self._intrinsic_model_pos += 1
+        self._intrinsic_model_inp[indices] = inp
+        self._intrinsic_model_pos += size
         if self._intrinsic_model_pos == self._intrinsic_model_buffer_size:
             self._intrinsic_model_full = True
             self._intrinsic_model_pos = 0
@@ -580,8 +595,8 @@ def test_get_samples():
     obs_space = replay_buffer.observation_space
     act_space = replay_buffer.action_space
     for i in range(10):
-        obs = {key: np.random.random((n_envs, ) + val.shape) for key, val in obs_space.items()}
-        action = np.random.random((n_envs, ) + act_space.shape)
+        obs = {key: np.random.random((n_envs,) + val.shape) for key, val in obs_space.items()}
+        action = np.random.random((n_envs,) + act_space.shape)
         reward = np.random.random(n_envs)
         next_obs = obs
         done = np.zeros(n_envs)
@@ -590,7 +605,7 @@ def test_get_samples():
 
     # Add a terminal state
     obs = {key: np.random.random((n_envs,) + val.shape) for key, val in obs_space.items()}
-    action = np.random.random((n_envs, ) + act_space.shape)
+    action = np.random.random((n_envs,) + act_space.shape)
     reward = np.random.random(n_envs)
     next_obs = obs
     done = np.ones(n_envs)
@@ -624,6 +639,7 @@ def test_get_samples():
                       torch.from_numpy(terminal_next_obs['obs']).type(torch.float32)) == 0).item()
     assert (torch.sum(samples.next_observations['obs'][-1] -
                       torch.from_numpy(next_obs['obs']).type(torch.float32)) == 0).item()
+
 
 if __name__ == "__main__":
     test_get_samples()
