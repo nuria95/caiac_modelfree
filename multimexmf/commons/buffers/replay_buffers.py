@@ -96,7 +96,7 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         self._reset_intrinsic_model_data()
 
     def _reset_intrinsic_model_data(self):
-        assert isinstance(self._intrinsic_model_inp_dim, int) or isinstance(self._intrinsic_model_labels, Dict)
+        assert isinstance(self._intrinsic_model_inp_dim, int) and isinstance(self._intrinsic_model_labels, Dict)
         self._intrinsic_model_inp = np.zeros((self._intrinsic_model_buffer_size, self.n_envs,
                                               self._intrinsic_model_inp_dim))
         self._intrinsic_model_out = {}
@@ -167,7 +167,7 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
 
     def add_batch_intrinsic_rewards(self, intrinsic_reward: np.ndarray):
         assert intrinsic_reward.shape[0] == self.pos - self.intrinsic_reward_pos, "intrinsic rewards should " \
-                                                                                      "be length as the trajectory"
+                                                                                      "be same length as the trajectory"
 
         indices = np.arange(0, intrinsic_reward.shape[0]) + self.intrinsic_reward_pos
         self.intrinsic_rewards[indices] = intrinsic_reward
@@ -223,7 +223,7 @@ class IntrinsicRewardRolloutBuffer(RolloutBuffer):
         for key in self._intrinsic_model_labels.keys():
             # Reshape needed when using multiple envs with discrete observations
             # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
-            self._intrinsic_model_out[key][indices] = labels[key]
+            self._intrinsic_model_out[key][indices] = np.array(labels[key])
 
         self._intrinsic_model_inp[indices] = inp
         self._intrinsic_model_pos += size
