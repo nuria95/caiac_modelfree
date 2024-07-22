@@ -672,13 +672,19 @@ class IntrinsicPPO(PPO):
                 if (
                         done
                         and infos[idx].get("terminal_observation") is not None
-                        and infos[idx].get("TimeLimit.truncated", False)
                 ):
-                    terminal_obs = self.policy.obs_to_tensor(infos[idx]["terminal_observation"])[0]
-                    next_obs = copy.deepcopy(infos[idx]["terminal_observation"])
-                    with th.no_grad():
-                        terminal_value = self.policy.predict_values(terminal_obs)  # type: ignore[arg-type]
-                    rewards[idx] += self.gamma * terminal_value[..., 0]
+                    term_obs = copy.deepcopy(infos[idx]["terminal_observation"])
+                    if numpy_obs:
+                        next_obs[idx] = np.array(infos[idx]["terminal_observation"])
+                    else:
+                        for key, val in term_obs.items():
+                            next_obs[key][idx] = np.array(val)
+                    if infos[idx].get("TimeLimit.truncated", False):
+                        terminal_obs = self.policy.obs_to_tensor(infos[idx]["terminal_observation"])[0]
+
+                        with th.no_grad():
+                            terminal_value = self.policy.predict_values(terminal_obs)  # type: ignore[arg-type]
+                        rewards[idx] += self.gamma * terminal_value[..., 0]
                     # TODO: See if this correction is needed for intrinsic reward since it is nonepisodic
                     # intrinsic_rewards[idx] *= self.gamma * terminal_value[..., -1]
 
