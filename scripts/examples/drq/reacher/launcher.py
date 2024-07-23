@@ -2,18 +2,43 @@ from experiments.utils import generate_run_commands, generate_base_command, dict
 from scripts.examples.drq.reacher import experiment as exp
 import argparse
 
-PROJECT_NAME = 'ReacherDrQ-12JulImg'
+PROJECT_NAME = 'ReacherDrQvTest-20JulImgHard'
 
 _applicable_configs = {
     'total_steps': [1_000_000],
     'num_envs': [8],
     'record_video': [0],
-    'encoder_feature_dim': [50, 128],
+    'encoder_feature_dim': [50],
     'seed': list(range(5)),
-    'project_name': [PROJECT_NAME]
+    'project_name': [PROJECT_NAME],
+    'task': ['hard'],
 }
 
-all_flags_combinations = dict_permutations(_applicable_configs)
+_applicable_configs_disagreement = {'alg': ['Disagreement'],
+                                    'exploitation_switch_at': [0.75],
+                                    'init_exploration_freq': [4],
+                                    'train_ensemble_with_target': [1],
+                                    'update_encoder_with_exploration_policy': [0, 1],
+                                    'predict_img_embed': [0, 1],
+                                    } | _applicable_configs
+_applicable_configs_drq = {'alg': ['DrQ'],
+                           'exploitation_switch_at': [0.75],
+                           'init_exploration_freq': [1],
+                           'train_ensemble_with_target': [0],
+                           'update_encoder_with_exploration_policy': [0]
+                           } | _applicable_configs
+
+_applicable_configs_drqv2 = {'alg': ['DrQv2'],
+                             'exploitation_switch_at': [0.75],
+                             'init_exploration_freq': [1],
+                             'train_ensemble_with_target': [0],
+                             'update_encoder_with_exploration_policy': [0]
+                             } | _applicable_configs
+
+
+all_flags_combinations = dict_permutations(_applicable_configs_drqv2) \
+                         + dict_permutations(_applicable_configs_drq) + \
+                         dict_permutations(_applicable_configs_disagreement)
 
 
 def main(args):
@@ -36,7 +61,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_cpus', type=int, default=1, help='number of cpus to use')
+    parser.add_argument('--num_cpus', type=int, default=4, help='number of cpus to use')
     parser.add_argument('--num_gpus', type=int, default=1, help='number of gpus to use')
     parser.add_argument('--mode', type=str, default='euler', help='how to launch the experiments')
     parser.add_argument('--long_run', default=False, action="store_true")

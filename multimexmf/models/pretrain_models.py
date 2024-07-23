@@ -353,13 +353,13 @@ class EnsembleMLP(nn.Module):
                     disagreement[key] = ratio.mean(-1)
             else:
                 assert val.shape[-1] == self.num_heads
-                epistemic_var = torch.square(val.std(dim=-1))
                 if self.use_entropy:
+                    epistemic_var = torch.square(val.std(dim=-1))
                     # take mean over output dim
                     disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
                 else:
                     # take mean over batch dim
-                    disagreement[key] = epistemic_var.mean(dim=-1)
+                    disagreement[key] = val.std(dim=-1).mean(dim=-1)
         return disagreement
 
 

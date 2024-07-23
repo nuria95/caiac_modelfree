@@ -268,10 +268,12 @@ class IntrinsicPPO(PPO):
                  intrinsic_vf_coef: Optional[float] = None,
                  rollout_buffer_class: Optional[Type[IntrinsicRewardRolloutBuffer]] = IntrinsicRewardRolloutBuffer,
                  rollout_buffer_kwargs: Optional[Dict[str, Any]] = None,
+                 normalize_intrinsic_reward: bool = False,
                  *args,
                  **kwargs
                  ):
         self.normalize_ensemble_training = normalize_ensemble_training
+        self.normalize_intrinsic_reward = normalize_intrinsic_reward
         self.intrinsic_reward_weights = intrinsic_reward_weights
         self.agg_intrinsic_reward = agg_intrinsic_reward
         self.intrinsic_reward_model = intrinsic_reward_model
@@ -738,7 +740,10 @@ class IntrinsicPPO(PPO):
                 labels[key] = self.output_normalizers[key].normalize(y)
             intrinsic_rewards = self.get_intrinsic_reward(labels=labels, inp=inp).reshape(-1, 1)
             # self.int_reward_normalizer.update(intrinsic_rewards)
-            intrinsic_rewards = self.int_reward_normalizer.scale(intrinsic_rewards)
+            # TODO: See if normalization is required
+            if self.normalize_intrinsic_reward:
+                intrinsic_rewards = self.int_reward_normalizer.scale(intrinsic_rewards)
+            # intrinsic_rewards = self.int_reward_normalizer.scale(intrinsic_rewards)
             # reshape everything back:
             intrinsic_rewards = intrinsic_rewards.reshape(-1, self.n_envs)
             inp = inp.reshape((-1, self.n_envs) + inp.shape[1:])
@@ -876,7 +881,8 @@ if __name__ == '__main__':
 
     ensemble_model_kwargs = {
         'learn_std': False,
-        'optimizer_kwargs': {'lr': 1e-4}
+        'optimizer_kwargs': {'lr': 1e-4},
+        'use_entropy': False,
     }
     intrinsic = True
     if intrinsic:
