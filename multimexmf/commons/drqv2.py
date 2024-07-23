@@ -216,7 +216,8 @@ class LinearNormalActionNoise(ActionNoise):
     :param final_sigma: (np.ndarray)
     """
 
-    def __init__(self, mean, sigma, max_steps, final_sigma=None, sigma_clip: float = 0.3):
+    def __init__(self, mean: float, sigma: float,
+                 max_steps: Optional[int] = None, final_sigma: float = None, sigma_clip: float = 0.3):
         self._mu = mean
         self._sigma = sigma
         self._step = 0
@@ -227,6 +228,7 @@ class LinearNormalActionNoise(ActionNoise):
         self._final_sigma = final_sigma
 
     def __call__(self):
+        assert self.has_max_steps
         t = min(1.0, self._step / self._max_steps)
         sigma = (1 - t) * self._sigma + t * self._final_sigma
         self._step += 1
@@ -236,6 +238,13 @@ class LinearNormalActionNoise(ActionNoise):
         t = min(1.0, self._step / self._max_steps)
         sigma = (1 - t) * self._sigma + t * self._final_sigma
         return np.max(sigma), self.sigma_clip
+
+    def set_max_steps(self, max_steps: int):
+        self._max_steps = max_steps
+
+    @property
+    def has_max_steps(self):
+        return self._max_steps is not None
 
 
 class DrQv2(DDPG):
@@ -259,7 +268,6 @@ class DrQv2(DDPG):
             action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
                                                    sigma=np.ones_like(sample),
                                                    final_sigma=np.ones_like(sample) * 0.1,
-                                                   max_steps=500_000,
                                                    sigma_clip=0.3,
                                                    )
 
@@ -281,6 +289,13 @@ class DrQv2(DDPG):
             self.actor_tau = actor_tau
         else:
             self.actor_tau = copy.deepcopy(self.tau)
+
+        if isinstance(self.action_noise, LinearNormalActionNoise):
+            # if max step is not specified, use the default for medium tough tasks in exploration.
+            if not self.action_noise.has_max_steps:
+                self.action_noise.set_max_steps(
+                    max_steps=500_000 // self.n_envs
+                )
 
     def learn(
             self,
