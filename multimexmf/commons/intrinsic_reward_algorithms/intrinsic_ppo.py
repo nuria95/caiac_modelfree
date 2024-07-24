@@ -34,8 +34,8 @@ class Normalizer:
         self._reset_normalization_stats()
 
     def _reset_normalization_stats(self):
-        self.mean = np.zeros(self.input_dim)
-        self.std = np.ones(self.input_dim)
+        self.mean = np.zeros(self.input_dim, dtype=np.float32)
+        self.std = np.ones(self.input_dim, dtype=np.float32)
         self.num_points = 0
 
     def update(self, x: np.ndarray):
@@ -419,8 +419,8 @@ class IntrinsicPPO(PPO):
 
     def get_intrinsic_reward(self, inp: np.ndarray, labels: Dict) -> th.Tensor:
         # calculate intrinsic reward
-        inp = torch.tensor(inp, device=self.device)
-        torch_labels = {key: torch.tensor(val, device=self.device) for key, val in labels.items()}
+        inp = torch.as_tensor(inp, device=self.device)
+        torch_labels = {key: torch.as_tensor(val, device=self.device) for key, val in labels.items()}
         if self.intrinsic_reward_model is None:
             return th.zeros(inp.shape[0], device=self.device)
         else:
