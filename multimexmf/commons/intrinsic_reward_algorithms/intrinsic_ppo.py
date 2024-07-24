@@ -419,8 +419,8 @@ class IntrinsicPPO(PPO):
 
     def get_intrinsic_reward(self, inp: np.ndarray, labels: Dict) -> th.Tensor:
         # calculate intrinsic reward
-        inp = torch.Tensor(inp, device=self.device)
-        torch_labels = {key: torch.Tensor(val, device=self.device) for key, val in labels.items()}
+        inp = torch.tensor(inp, device=self.device)
+        torch_labels = {key: torch.tensor(val, device=self.device) for key, val in labels.items()}
         if self.intrinsic_reward_model is None:
             return th.zeros(inp.shape[0], device=self.device)
         else:
