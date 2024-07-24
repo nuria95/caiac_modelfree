@@ -50,18 +50,18 @@ class Normalizer:
 
         new_var = new_s_n / total_points
         std = np.sqrt(new_var)
-        self.mean = mean
-        self.std = np.clip(std, a_min=1e-6, a_max=None)
+        self.mean = mean.astype(np.float32)
+        self.std = np.clip(std, a_min=1e-6, a_max=None).astype(np.float32)
         self.num_points = total_points
 
     def normalize(self, x: np.ndarray):
-        return (x - self.mean) / self.std
+        return ((x - self.mean) / self.std).astype(np.float32)
 
     def denormalize(self, norm_x: np.ndarray):
-        return norm_x * self.std + self.mean
+        return (norm_x * self.std + self.mean).astype(np.float32)
 
     def scale(self, x: np.ndarray):
-        return x / self.std
+        return (x / self.std).astype(np.float32)
 
 
 class IntrinsicActorCriticPolicy(ActorCriticPolicy):
