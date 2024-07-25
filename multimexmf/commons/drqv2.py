@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import copy
 import torch.nn as nn
-from stable_baselines3.common.noise import ActionNoise
+from stable_baselines3.common.noise import ActionNoise, VectorizedActionNoise
 from multimexmf.commons.buffers.replay_buffers import NStepDictReplayBuffer
 from stable_baselines3.ddpg import DDPG
 from stable_baselines3.td3.policies import TD3Policy
@@ -235,7 +235,7 @@ class LinearNormalActionNoise(ActionNoise):
         return np.random.normal(self._mu, sigma)
 
     def get_current_sigma(self):
-        t = min(1.0, self._step / self._max_steps)
+        t = min(1.0, max((self._step - 1), 0) / self._max_steps)
         sigma = (1 - t) * self._sigma + t * self._final_sigma
         return np.max(sigma), self.sigma_clip
 
@@ -330,8 +330,12 @@ class DrQv2(DDPG):
 
     @property
     def noise_std(self):
-        if isinstance(self.action_noise.base_noise, LinearNormalActionNoise):
-            return self.action_noise.base_noise.get_current_sigma()
+        if isinstance(self.action_noise, VectorizedActionNoise):
+            if isinstance(self.action_noise.base_noise, LinearNormalActionNoise):
+                noises = self.action_noise.noises
+                return max([noise.get_current_sigma() for noise in noises])
+        elif isinstance(self.action_noise, LinearNormalActionNoise):
+            return self.action_noise.get_current_sigma()
         else:
             return self.target_policy_noise, self.target_noise_clip
 
