@@ -410,6 +410,8 @@ class DrQv2(DDPG):
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        exploitation_noise, _ = self.noise_std
+        self.logger.record("train/exploitation_noise", exploitation_noise)
 
 
 if __name__ == '__main__':
