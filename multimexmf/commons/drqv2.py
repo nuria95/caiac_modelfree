@@ -216,8 +216,8 @@ class LinearNormalActionNoise(ActionNoise):
     :param final_sigma: (np.ndarray)
     """
 
-    def __init__(self, mean: float, sigma: float,
-                 max_steps: Optional[int] = None, final_sigma: float = None, sigma_clip: float = 0.3):
+    def __init__(self, mean: np.ndarray, sigma: np.ndarray,
+                 max_steps: Optional[int] = None, final_sigma: np.ndarray = None, sigma_clip: float = 0.3):
         self._mu = mean
         self._sigma = sigma
         self._step = 0
@@ -264,13 +264,14 @@ class DrQv2(DDPG):
         self.log_image = True
         self.n_steps = n_steps
         if action_noise is None:
-            sample = env.action_space.sample()
-            action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
-                                                   sigma=np.ones_like(sample),
-                                                   final_sigma=np.ones_like(sample) * 0.1,
-                                                   sigma_clip=0.3,
-                                                   )
-
+            # specify use constant sechedule if action noise is not specified
+             sample = env.action_space.sample()
+             action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
+                                                    sigma=np.ones_like(sample) * 0.2,
+                                                    final_sigma=np.ones_like(sample) * 0.2,
+                                                    sigma_clip=0.3,
+                                                    max_steps=1,
+                                                    )
         if policy_kwargs:
             if "n_critics" not in policy_kwargs:
                 policy_kwargs["n_critics"] = 2
