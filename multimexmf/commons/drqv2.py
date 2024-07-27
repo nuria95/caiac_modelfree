@@ -247,6 +247,12 @@ class LinearNormalActionNoise(ActionNoise):
         return self._max_steps is not None
 
 
+def clamp(x: torch.Tensor, bound: float):
+    clamped_x = torch.clamp(x, -bound + 1e-6, bound - 1e-6)
+    x = x - x.detach() + clamped_x.detach()
+    return x
+
+
 class DrQv2(DDPG):
     def __init__(self,
                  env: Union[GymEnv, str],
@@ -265,13 +271,13 @@ class DrQv2(DDPG):
         self.n_steps = n_steps
         if action_noise is None:
             # specify use constant sechedule if action noise is not specified
-             sample = env.action_space.sample()
-             action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
-                                                    sigma=np.ones_like(sample) * 0.2,
-                                                    final_sigma=np.ones_like(sample) * 0.2,
-                                                    sigma_clip=0.3,
-                                                    max_steps=1,
-                                                    )
+            sample = env.action_space.sample()
+            action_noise = LinearNormalActionNoise(mean=np.zeros_like(sample),
+                                                   sigma=np.ones_like(sample) * 0.2,
+                                                   final_sigma=np.ones_like(sample) * 0.2,
+                                                   sigma_clip=0.3,
+                                                   max_steps=1,
+                                                   )
         if policy_kwargs:
             if "n_critics" not in policy_kwargs:
                 policy_kwargs["n_critics"] = 2
@@ -361,8 +367,9 @@ class DrQv2(DDPG):
                 # Select action according to policy and add clipped noise
                 noise_std, noise_clip = self.noise_std
                 noise = replay_data.actions.clone().data.normal_(0, noise_std)
+                noise = clamp(noise, bound=noise_clip)
                 noise = noise.clamp(-noise_clip, noise_clip)
-                next_actions = (self.actor_target(next_obs) + noise).clamp(-1, 1)
+                next_actions = clamp(self.actor_target(next_obs) + noise, 1.0)
 
                 # Compute the next Q-values: min over all critics targets
                 next_q_values = torch.cat(self.critic_target(next_obs, next_actions), dim=1)
@@ -389,8 +396,8 @@ class DrQv2(DDPG):
                 # Compute actor loss
                 obs = obs.detach()
                 noise = replay_data.actions.clone().data.normal_(0, noise_std)
-                noise = noise.clamp(-noise_clip, noise_clip)
-                actions = (self.actor(obs) + noise).clamp(-1, 1)
+                noise = clamp(noise, bound=noise_clip)
+                actions = clamp(self.actor(obs) + noise, bound=1.0)
                 q_values = torch.cat(self.critic(obs, actions), dim=1)
                 q_values, _ = torch.min(q_values, dim=1, keepdim=True)
                 actor_loss = - q_values.mean()
