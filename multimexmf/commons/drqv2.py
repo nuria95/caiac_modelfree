@@ -368,7 +368,6 @@ class DrQv2(DDPG):
                 noise_std, noise_clip = self.noise_std
                 noise = replay_data.actions.clone().data.normal_(0, noise_std)
                 noise = clamp(noise, bound=noise_clip)
-                noise = noise.clamp(-noise_clip, noise_clip)
                 next_actions = clamp(self.actor_target(next_obs) + noise, 1.0)
 
                 # Compute the next Q-values: min over all critics targets
