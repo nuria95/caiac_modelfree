@@ -7,7 +7,7 @@ from stable_baselines3.sac.policies import get_action_dim
 from typing import Optional, Union, Dict, Type
 import numpy as np
 import torch as th
-from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer, MultiHeadGaussianEnsemble, EPS
+from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer, EPS
 from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.utils import polyak_update
@@ -157,7 +157,6 @@ class MaxEntropySAC(SAC):
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
-        self.ensemble_model.train(True)
         # Update optimizers learning rate
         optimizers = [self.actor.optimizer, self.critic.optimizer]
         if self.ent_coef_optimizer is not None:
@@ -283,6 +282,7 @@ class MaxEntropySAC(SAC):
                 # if gradient_step == normalization_index:
                 #    self.output_normalizers[key].update(y)
                 labels[key] = self.output_normalizers[key].normalize(y)
+            self.ensemble_model.train()
             self.ensemble_model.optimizer.zero_grad()
             prediction = self.ensemble_model(inp)
             loss = self.ensemble_model.loss(prediction=prediction, target=labels)
@@ -294,6 +294,7 @@ class MaxEntropySAC(SAC):
             total_loss = stacked_losses.mean()
             total_loss.backward()
             self.ensemble_model.optimizer.step()
+            self.ensemble_model.eval()
 
         self._n_updates += gradient_steps
         self.ensemble_model.train(False)
@@ -337,7 +338,6 @@ if __name__ == '__main__':
     from multimexmf.commons.intrinsic_reward_algorithms.utils import \
         DisagreementIntrinsicReward, exploration_frequency_schedule
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
-
 
     class CustomPendulumEnv(PendulumEnv):
         def __init__(self, *args, **kwargs):
