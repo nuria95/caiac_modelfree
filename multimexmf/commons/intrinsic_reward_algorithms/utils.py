@@ -7,7 +7,8 @@ import numpy as np
 
 
 class BaseIntrinsicReward(ABC):
-    def __init__(self, ensemble_model: EnsembleMLP, intrinsic_reward_weights: Dict, agg_intrinsic_reward: str = 'sum'):
+    def __init__(self, ensemble_model: torch.nn.Module,
+                 intrinsic_reward_weights: Dict, agg_intrinsic_reward: str = 'sum'):
         self.intrinsic_reward_weights = intrinsic_reward_weights
         self.agg_intrinsic_reward = agg_intrinsic_reward
         self.ensemble_model = ensemble_model
@@ -20,29 +21,11 @@ class BaseIntrinsicReward(ABC):
             intrinsic_rewards = intrinsic_rewards.sum(dim=0)
         elif self.agg_intrinsic_reward == 'max':
             intrinsic_rewards = intrinsic_rewards.max(dim=0)
+        elif self.agg_intrinsic_reward == 'mean':
+            intrinsic_rewards = intrinsic_rewards.mean(dim=0)
         else:
             raise NotImplementedError
         return intrinsic_rewards
-
-
-class RNDIntrinsicReward(BaseIntrinsicReward):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # use a randomly initialized network to give targets
-        self.target_ensemble = copy.deepcopy(self.ensemble_model)
-
-    def __call__(self, inp: torch.Tensor, labels: Dict):
-        self.ensemble_model.eval()
-        predictions = self.ensemble_model(inp)
-        targets = self.target_ensemble(inp)
-        error = torch.stack([
-            # take mean of ensemble as prediction
-            ((predictions[key].mean(dim=-1) - y) ** 2
-             ).mean(dim=-1) * self.intrinsic_reward_weights[key]  # take mean error over the dimension of output
-            for key, y in targets.items()])
-        error = self.aggregate_intrinsic_reward(error)
-        return error
 
 
 class CuriosityIntrinsicReward(BaseIntrinsicReward):
