@@ -11,7 +11,7 @@ from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer, EPS
 from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.utils import polyak_update
-from multimexmf.commons.intrinsic_reward_algorithms.utils import BaseIntrinsicReward
+from multimexmf.commons.intrinsic_reward_algorithms.utils import DisagreementIntrinsicReward
 
 
 class MaxEntropySAC(SAC):
@@ -335,8 +335,6 @@ if __name__ == '__main__':
     from gymnasium.envs.classic_control.pendulum import PendulumEnv
     from gymnasium.wrappers.time_limit import TimeLimit
     from typing import Optional
-    from multimexmf.commons.intrinsic_reward_algorithms.utils import \
-        DisagreementIntrinsicReward, exploration_frequency_schedule
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
 
     class CustomPendulumEnv(PendulumEnv):
