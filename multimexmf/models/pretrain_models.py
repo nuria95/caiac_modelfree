@@ -172,59 +172,66 @@ class MultiHeadGaussianEnsemble(nn.Module):
         batch_size = x.shape[0]
         for feat in self.feat:
             x = feat(x)
-
         output_dict = {}
-        for key, shape in self.output_shapes.items():
-            pred = self.output_modules[key](x).reshape(batch_size, -1, self.num_heads)
-            if self.learn_std:
+        if self.learn_std:
+            for key, shape in self.output_shapes.items():
+                pred = self.output_modules[key](x).reshape(batch_size, -1, self.num_heads)
                 mean, log_std = torch.split(pred, shape, dim=-2)
                 std = nn.functional.softplus(log_std)
                 std = torch.clamp(std, min=self.min_std, max=self.max_std)
                 output_dict[key] = (mean, std)
-            else:
+        else:
+            for key, shape in self.output_shapes.items():
+                pred = self.output_modules[key](x).reshape(batch_size, -1, self.num_heads)
                 output_dict[key] = pred
         return output_dict
 
     def loss(self, prediction: Dict, target: Dict):
         loss = {}
-        for key, val in target.items():
-            if self.learn_std:
+        if self.learn_std:
+            for key, val in target.items():
                 assert isinstance(prediction[key], Tuple)
                 # dim: batch, feature, num_ensemble
                 mean, std = prediction[key]
                 var = torch.square(std)
                 loss[key] = (((mean - val[..., None]) ** 2) / var + 2 * torch.log(var)).mean()
-            else:
+        else:
+            for key, val in target.items():
                 mean = prediction[key]
                 loss[key] = ((mean - val[..., None]) ** 2).mean()
         return loss
 
     def get_disagreement(self, prediction: Dict) -> Dict:
         disagreement = {}
-        for key, val in prediction.items():
-            if self.learn_std:
-                assert isinstance(prediction[key], Tuple)
-                mean, std = val
-                assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
-                epistemic_std = mean.std(dim=-1)
-                al_std = torch.sqrt(torch.square(std).mean(dim=-1))
-                ratio = torch.square(epistemic_std / al_std)
-                if self.use_entropy:
-                    # take mean over output dim
+        if self.learn_std:
+            if self.use_entropy:
+                for key, val in prediction.items():
+                    assert isinstance(prediction[key], Tuple)
+                    mean, std = val
+                    assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
+                    epistemic_std = mean.std(dim=-1)
+                    al_std = torch.sqrt(torch.square(std).mean(dim=-1))
+                    ratio = torch.square(epistemic_std / al_std)
                     disagreement[key] = torch.log(1 + ratio).mean(dim=-1)
-                else:
-                    # take mean over batch dim
-                    disagreement[key] = ratio.mean(-1)
             else:
-                assert val.shape[-1] == self.num_heads
-                epistemic_var = torch.square(val.std(dim=-1))
-                if self.use_entropy:
-                    # take mean over output dim
+                for key, val in prediction.items():
+                    assert isinstance(prediction[key], Tuple)
+                    mean, std = val
+                    assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
+                    epistemic_std = mean.std(dim=-1)
+                    al_std = torch.sqrt(torch.square(std).mean(dim=-1))
+                    ratio = torch.square(epistemic_std / al_std)
+                    disagreement[key] = ratio.mean(-1)
+        else:
+            if self.use_entropy:
+                for key, val in prediction.items():
+                    assert val.shape[-1] == self.num_heads
+                    epistemic_var = torch.square(val.std(dim=-1))
                     disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
-                else:
-                    # take mean over batch dim
-                    disagreement[key] = epistemic_var.mean(dim=-1)
-
+            else:
+                for key, val in prediction.items():
+                    assert val.shape[-1] == self.num_heads
+                    disagreement[key] = val.std(dim=-1).mean(dim=-1)
         return disagreement
 
 
@@ -301,64 +308,72 @@ class EnsembleMLP(nn.Module):
                 optimizer_kwargs["eps"] = 1e-5
 
         self.optimizer = optimizer_class(self.parameters(), **optimizer_kwargs)
+        if self.learn_std:
+            self.split_sizes = [2 * val for val in self.output_shapes.values()]
+        else:
+            self.split_sizes = [val for val in self.output_shapes.values()]
 
     def forward(self, x) -> Dict:
         # concatenate outputs of the ensemble
         outputs = torch.cat([model(x)[..., None] for model in self.models], dim=-1)
-        if self.learn_std:
-            # split by 2 x output size if learning stds
-            outputs = torch.split(outputs, [2 * val for val in self.output_shapes.values()], dim=-2)
-        else:
-            outputs = torch.split(outputs, [val for val in self.output_shapes.values()], dim=-2)
+        outputs = torch.split(outputs, self.split_sizes, dim=-2)
         output_dict = {}
-        for i, (key, val) in enumerate(self.output_shapes.items()):
-            if self.learn_std:
+        if self.learn_std:
+            for i, (key, val) in enumerate(self.output_shapes.items()):
                 mean, log_std = torch.split(outputs[i], val, dim=-2)
                 std = nn.functional.softplus(log_std)
                 std = torch.clamp(std, min=self.min_std, max=self.max_std)
                 output_dict[key] = (mean, std)
-            else:
+        else:
+            for i, (key, val) in enumerate(self.output_shapes.items()):
                 output_dict[key] = outputs[i]
         return output_dict
 
     def loss(self, prediction: Dict, target: Dict):
         loss = {}
-        for key, val in target.items():
-            if self.learn_std:
+        if self.learn_std:
+            for key, val in target.items():
                 assert isinstance(prediction[key], Tuple)
                 # dim: batch, feature, num_ensemble
                 mean, std = prediction[key]
                 var = torch.square(std)
                 loss[key] = (((mean - val[..., None]) ** 2) / var + 2 * torch.log(var)).mean()
-            else:
+        else:
+            for key, val in target.items():
                 mean = prediction[key]
                 loss[key] = ((mean - val[..., None]) ** 2).mean()
         return loss
 
     def get_disagreement(self, prediction: Dict) -> Dict:
         disagreement = {}
-        for key, val in prediction.items():
-            if self.learn_std:
-                assert isinstance(prediction[key], Tuple)
-                mean, std = val
-                assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
-                epistemic_std = mean.std(dim=-1)
-                al_std = std.mean(dim=-1)
-                ratio = torch.square(epistemic_std / al_std)
-                if self.use_entropy:
-                    # take mean over output dim
+        if self.learn_std:
+            if self.use_entropy:
+                for key, val in prediction.items():
+                    assert isinstance(prediction[key], Tuple)
+                    mean, std = val
+                    assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
+                    epistemic_std = mean.std(dim=-1)
+                    al_std = torch.sqrt(torch.square(std).mean(dim=-1))
+                    ratio = torch.square(epistemic_std / al_std)
                     disagreement[key] = torch.log(1 + ratio).mean(dim=-1)
-                else:
-                    # take mean over batch dim
-                    disagreement[key] = ratio.mean(-1)
             else:
-                assert val.shape[-1] == self.num_heads
-                if self.use_entropy:
+                for key, val in prediction.items():
+                    assert isinstance(prediction[key], Tuple)
+                    mean, std = val
+                    assert mean.shape[-1] == self.num_heads and std.shape[-1] == self.num_heads
+                    epistemic_std = mean.std(dim=-1)
+                    al_std = torch.sqrt(torch.square(std).mean(dim=-1))
+                    ratio = torch.square(epistemic_std / al_std)
+                    disagreement[key] = ratio.mean(-1)
+        else:
+            if self.use_entropy:
+                for key, val in prediction.items():
+                    assert val.shape[-1] == self.num_heads
                     epistemic_var = torch.square(val.std(dim=-1))
-                    # take mean over output dim
                     disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
-                else:
-                    # take mean over batch dim
+            else:
+                for key, val in prediction.items():
+                    assert val.shape[-1] == self.num_heads
                     disagreement[key] = val.std(dim=-1).mean(dim=-1)
         return disagreement
 
@@ -479,13 +494,13 @@ class DropoutEnsemble(nn.Module):
 
     def get_disagreement(self, prediction: Dict) -> Dict:
         disagreement = {}
-        for key, val in prediction.items():
-            assert val.shape[-1] == self.num_heads
-            if self.use_entropy:
+        if self.use_entropy:
+            for key, val in prediction.items():
                 epistemic_var = torch.square(val.std(dim=-1))
                 # take mean over output dim
                 disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
-            else:
+        else:
+            for key, val in prediction.items():
                 # take mean over batch dim
                 disagreement[key] = val.std(dim=-1).mean(dim=-1)
         return disagreement
@@ -512,7 +527,7 @@ if __name__ == '__main__':
     ys = torch.concatenate([torch.sin(xs), torch.cos(xs)], dim=1)
     ys = ys + noise_level * torch.randn(size=ys.shape)
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
-    model = DropoutEnsemble(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
+    model = EnsembleMLP(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
                                                   'y2': ys[..., -1].reshape(-1, 1)}, features=(256, 256),
                         optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
                         learn_std=learn_std)
