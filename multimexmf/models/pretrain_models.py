@@ -2,7 +2,7 @@ from M3L.models.pretrain_models import VTMAE as M3LVTMAE
 import torch
 import torch as th
 import torch.nn as nn
-from typing import Tuple, Dict, Optional, Type, Any, Union
+from typing import Tuple, Dict, Optional, Type, Any, Union, List
 from stable_baselines3.common.utils import get_device
 
 EPS = 1e-6
@@ -363,6 +363,141 @@ class EnsembleMLP(nn.Module):
         return disagreement
 
 
+def dropout_weights_init_(m):
+    # weight init helper function
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight, gain=1)
+        torch.nn.init.constant_(m.bias, 0)
+
+
+class DropoutMlp(nn.Module):
+    def __init__(
+            self,
+            input_size: int,
+            output_size: int,
+            hidden_sizes: Union[List[int], Tuple[int]],
+            hidden_activation: Type[nn.Module] = nn.ReLU,
+            target_drop_rate: float = 0.0,
+            layer_norm: bool = False
+
+    ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.hidden_activation = hidden_activation()
+        ## here we use ModuleList so that the layers in it can be
+        ## detected by .parameters() call
+        self.hidden_layers = nn.ModuleList()
+        in_size = input_size
+
+        ## initialize each hidden layer
+        for i, next_size in enumerate(hidden_sizes):
+            fc_layer = nn.Linear(in_size, next_size)
+            in_size = next_size
+            self.hidden_layers.append(fc_layer)
+
+            # added 20211206
+            if target_drop_rate > 0.0:
+                self.hidden_layers.append(nn.Dropout(p=target_drop_rate))  # dropout
+            if layer_norm:
+                self.hidden_layers.append(nn.LayerNorm(fc_layer.out_features))  # layer norm
+
+        # added to fix bug 20211207
+        self.apply_activation_per = 1
+        if target_drop_rate > 0.0:
+            self.apply_activation_per += 1
+        if layer_norm:
+            self.apply_activation_per += 1
+
+        ## init last fully connected layer with small weight and bias
+        self.last_fc_layer = nn.Linear(in_size, output_size)
+        self.apply(dropout_weights_init_)
+
+    def forward(self, input):
+        h = input
+        for i, fc_layer in enumerate(self.hidden_layers):
+            h = fc_layer(h)
+            # h = self.hidden_activation(h)
+            if ((i + 1) % self.apply_activation_per) == 0:
+                h = self.hidden_activation(h)
+        output = self.last_fc_layer(h)
+        return output
+
+
+class DropoutEnsemble(nn.Module):
+    def __init__(self, input_dim: int, output_dict: Dict, num_heads: int = 5,
+                 features: Tuple = (256, 256, 256), learn_std: bool = False, min_std: float = 1e-3,
+                 max_std: float = 1e2,
+                 use_entropy: bool = True,
+                 optimizer_class: Type[torch.optim.Optimizer] = torch.optim.Adam,
+                 optimizer_kwargs: Optional[Dict[str, Any]] = None,
+                 dropout_rate: float = 0.01, layer_norm: bool = True,
+                 ):
+        super().__init__()
+        assert not learn_std, "std learning is not implemented for dropout ensemble"
+        self.num_heads = num_heads
+        self.output_shapes = {k: v.shape[-1] for k, v in output_dict.items()}
+        self.min_std = min_std
+        self.max_std = max_std
+        self.learn_std = learn_std
+        output_dim = sum(self.output_shapes.values())
+        self.model = DropoutMlp(
+            input_size=input_dim,
+            output_size=output_dim,
+            hidden_sizes=features,
+            target_drop_rate=dropout_rate,
+            layer_norm=layer_norm,
+        )
+
+        self.use_entropy = use_entropy
+        self.output_dict = output_dict
+
+        if optimizer_kwargs is None:
+            optimizer_kwargs = {}
+            # Small values to avoid NaN in Adam optimizer
+            if optimizer_class == torch.optim.Adam:
+                optimizer_kwargs["eps"] = 1e-5
+
+        self.optimizer = optimizer_class(self.parameters(), **optimizer_kwargs)
+
+    def forward(self, x) -> Dict:
+        # do forward pass with dropout and concatenate predictions
+        training = self.training
+        if training:
+            outputs = self.model(x)
+            outputs = torch.split(outputs, [val for val in self.output_shapes.values()], dim=-1)
+        else:
+            self.train()
+            outputs = torch.cat([self.model(x)[..., None] for _ in range(self.num_heads)], dim=-1)
+            outputs = torch.split(outputs, [val for val in self.output_shapes.values()], dim=-2)
+            self.eval()
+        output_dict = {}
+        for i, (key, val) in enumerate(self.output_shapes.items()):
+            output_dict[key] = outputs[i]
+        return output_dict
+
+    def get_disagreement(self, prediction: Dict) -> Dict:
+        disagreement = {}
+        for key, val in prediction.items():
+            assert val.shape[-1] == self.num_heads
+            if self.use_entropy:
+                epistemic_var = torch.square(val.std(dim=-1))
+                # take mean over output dim
+                disagreement[key] = torch.log(EPS + epistemic_var).mean(dim=-1)
+            else:
+                # take mean over batch dim
+                disagreement[key] = val.std(dim=-1).mean(dim=-1)
+        return disagreement
+
+    def loss(self, prediction: Dict, target: Dict):
+        loss = {}
+        for key, val in target.items():
+            mean = prediction[key]
+            loss[key] = ((mean - val) ** 2).mean()
+        return loss
+
+
 if __name__ == '__main__':
     learn_std = False
     from torch.utils.data import TensorDataset, DataLoader
@@ -377,7 +512,7 @@ if __name__ == '__main__':
     ys = torch.concatenate([torch.sin(xs), torch.cos(xs)], dim=1)
     ys = ys + noise_level * torch.randn(size=ys.shape)
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
-    model = EnsembleMLP(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
+    model = DropoutEnsemble(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
                                                   'y2': ys[..., -1].reshape(-1, 1)}, features=(256, 256),
                         optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
                         learn_std=learn_std)
