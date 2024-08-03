@@ -12,6 +12,7 @@ from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.utils import polyak_update
 from multimexmf.commons.intrinsic_reward_algorithms.utils import DisagreementIntrinsicReward
+from stable_baselines3.common.type_aliases import MaybeCallback
 
 
 class MaxEntropySAC(SAC):
@@ -327,6 +328,24 @@ class MaxEntropySAC(SAC):
                                                 replay_data.rewards)
             for key, y in labels.items():
                 self.output_normalizers[key].update(y)
+
+    def learn(
+        self,
+        total_timesteps: int,
+        callback: MaybeCallback = None,
+        log_interval: int = 4,
+        tb_log_name: str = "MaxEntSac",
+        reset_num_timesteps: bool = True,
+        progress_bar: bool = False,
+    ):
+        return super().learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            log_interval=log_interval,
+            tb_log_name=tb_log_name,
+            reset_num_timesteps=reset_num_timesteps,
+            progress_bar=progress_bar,
+        )
 
 
 if __name__ == '__main__':
