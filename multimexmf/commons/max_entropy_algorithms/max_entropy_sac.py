@@ -25,6 +25,8 @@ class MaxEntropySAC(SAC):
                  learn_rewards: bool = True,
                  dynamics_entropy_schedule: Optional[Schedule] = None,
                  scale_dyn_entropy_with_action_dim: bool = True,
+                 target_info_tau: float = 0.25,
+                 target_info_gain: Union[str, float] = 'auto',
                  *args,
                  **kwargs
                  ):
@@ -49,6 +51,18 @@ class MaxEntropySAC(SAC):
             self.dyn_entropy_scale = get_action_dim(self.action_space)
         else:
             self.dyn_entropy_scale = 1.0
+
+        if isinstance(target_info_gain, str):
+            if target_info_gain == 'auto':
+                self.target_info_gain = torch.zeros(1).squeeze()
+                self.target_info_tau = target_info_tau
+            else:
+                raise NotImplementedError
+        elif isinstance(target_info_gain, float):
+            self.target_info_gain = torch.tensor([target_info_gain]).squeeze()
+            self.target_info_tau = 0.0
+        else:
+            raise NotImplementedError
 
     def get_dynamics_entropy_weight(self):
         return self.dynamics_entropy_schedule(self._current_progress_remaining)
@@ -170,7 +184,7 @@ class MaxEntropySAC(SAC):
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
 
-        dynamics_entropies = []
+        dynamics_info_gain, target_info_gain = [], []
 
         ensemble_losses = collections.defaultdict(list)
 
@@ -195,7 +209,10 @@ class MaxEntropySAC(SAC):
                 inp=inp,
                 labels=None,
             ).reshape(-1, 1)
-            dynamics_entropies.append(dynamics_entropy.mean().item())
+            batch_entropy = dynamics_entropy.mean()
+            dynamics_info_gain.append(batch_entropy.item())
+            batch_entropy = batch_entropy * dyn_ent_weight
+            target_info_gain.append(self.target_info_gain.item())
             total_entropy = -log_prob + dynamics_entropy * dyn_ent_weight
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
@@ -203,7 +220,8 @@ class MaxEntropySAC(SAC):
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (-total_entropy + self.target_entropy).detach()).mean()
+                ent_coef_loss = -(self.log_ent_coef * (-total_entropy +
+                                                       self.target_info_gain + self.target_entropy).detach()).mean()
                 ent_coef_losses.append(ent_coef_loss.item())
             else:
                 ent_coef = self.ent_coef_tensor
@@ -231,7 +249,6 @@ class MaxEntropySAC(SAC):
                     inp=inp,
                     labels=None,
                 ).reshape(-1, 1)
-
 
                 # add entropy term
                 next_q_values = next_q_values - ent_coef * (-next_obs_dynamics_entropy * dyn_ent_weight
@@ -272,6 +289,8 @@ class MaxEntropySAC(SAC):
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
                 # Copy running stats, see GH issue #996
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+                self.target_info_gain = (1 - self.target_info_tau) * self.target_info_gain + \
+                                        self.target_info_tau * batch_entropy.detach()
 
             # ensemble model training
             inp = th.cat([features, replay_data.actions], dim=-1)
@@ -312,7 +331,8 @@ class MaxEntropySAC(SAC):
                 self.output_normalizers[key].std.cpu().numpy()))
         self.logger.record(f"train/inp_normalizer_mean", np.mean(self.input_normalizer.mean.cpu().numpy()))
         self.logger.record(f"train/inp_normalizer_std", np.mean(self.input_normalizer.std.cpu().numpy()))
-        self.logger.record("train/dynamics_entropies", np.mean(dynamics_entropies))
+        self.logger.record("train/dynamics_info_gain", np.mean(dynamics_info_gain))
+        self.logger.record("train/target_info_gain", np.mean(target_info_gain))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
         self.logger.record("train/dyn_ent_weight", dyn_ent_weight)
@@ -437,6 +457,7 @@ if __name__ == '__main__':
         algorithm = MaxEntropySAC(
             env=vec_env,
             ensemble_model_kwargs=ensemble_model_kwargs,
+            dynamics_entropy_schedule=lambda x: float(x > 0.0),
             **algorithm_kwargs
         )
     else:
