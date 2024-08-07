@@ -1,4 +1,3 @@
-from M3L.models.pretrain_models import VTMAE as M3LVTMAE
 import torch
 import torch as th
 import torch.nn as nn
@@ -6,78 +5,6 @@ from typing import Tuple, Dict, Optional, Type, Any, Union, List
 from stable_baselines3.common.utils import get_device
 
 EPS = 1e-6
-
-
-class VTMAE(M3LVTMAE):
-    def __init__(self, patch_agg: str = 'max_min', *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.patch_agg = patch_agg
-
-    def aggregate_patches(self, x: dict) -> dict:
-        if self.patch_agg == 'mean':
-            return {k: torch.mean(v, dim=-2) for k, v in x.items()}
-        elif self.patch_agg == 'max_min':
-            x = {k: torch.cat([torch.max(v, dim=-2).values[..., None], torch.min(v, dim=-2).values[..., None]], dim=-1)
-                 for k, v in x.items()}
-            return {k: v.reshape((*v.shape[:-2], -1)) for k, v in x.items()}
-        elif self.patch_agg == 'all':
-            return {k: v.reshape((*v.shape[:-2], -1)) for k, v in x.items()}
-        else:
-            raise NotImplementedError
-
-    def get_observation_emb(self, x: dict, eval: bool = True, use_vision: bool = True, use_tactile: bool = True) \
-            -> dict:
-
-        if eval:
-            self.eval()
-        else:
-            self.train()
-        if 'image' in x.keys():
-            batch = x['image'].shape[0]
-            device = x['image'].device
-        elif 'tactile' in x.keys():
-            batch = x['tactile1'].shape[0]
-            device = x['tactile1'].device
-            use_vision = False
-        else:
-            raise AssertionError
-
-        if self.early_conv_masking:
-            if use_vision:
-                image_tokens = self.early_conv_vision(x['image'])
-            else:
-                image_tokens = torch.zeros((batch, 0, self.encoder_dim)).to(device)
-            if self.num_tactiles > 0 and use_tactile:
-                tactile_tokens_list = []
-                for i in range(self.num_tactiles):
-                    tactile_tokens_list.append(self.early_conv_tactile(x['tactile' + str(i + 1)]))
-                tactile_tokens = torch.cat(tactile_tokens_list, dim=1)
-            else:
-                tactile_tokens = torch.zeros((batch, 0, image_tokens.shape[-1])).to(device)
-
-        else:
-            if use_vision:
-                image_patches = self.image_to_patch(x['image'])
-                batch, num_image_patches, *_ = image_patches.shape
-                image_tokens = self.image_patch_to_emb(image_patches)
-            else:
-                image_tokens = torch.zeros((batch, 0, self.encoder_dim)).to(device)
-
-            if self.num_tactiles > 0 and use_tactile:
-                tactile_patches_list = []
-                for i in range(self.num_tactiles):
-                    tactile_patches_list.append(self.tactile_to_patch(x['tactile' + str(i + 1)]))
-                tactile_patches = torch.cat(tactile_patches_list, dim=1)
-                batch, num_tactile_patches, *_ = tactile_patches.shape
-                tactile_tokens = self.tactile_patch_to_emb(tactile_patches)
-            else:
-                tactile_tokens = torch.zeros((batch, 0, self.encoder_dim)).to(device)
-
-        embeddings = {
-            'image': image_tokens,
-            'tactile': tactile_tokens,
-        }
-        return self.aggregate_patches(embeddings)
 
 
 class Normalizer:
