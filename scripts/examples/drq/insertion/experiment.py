@@ -123,7 +123,7 @@ def experiment(
     act = vec_env.action_space.sample()
     action_noise = LinearNormalActionNoise(
         mean=np.zeros_like(act),
-        sigma=np.ones_like(action_cost) * 1.0,
+        sigma=np.ones_like(action_cost) * sig,
         final_sigma=np.ones_like(action_cost) * sig,
         max_steps=500_000 // num_envs,
     )
@@ -261,7 +261,7 @@ if __name__ == '__main__':
     parser.add_argument('--logs_dir', type=str, default='./logs/')
     parser.add_argument('--project_name', type=str, default='CartPoleImgTest')
     parser.add_argument('--alg', type=str, default='MaxEntDrQ')
-    parser.add_argument('--total_steps', type=int, default=1_000_000)
+    parser.add_argument('--total_steps', type=int, default=500_000)
     parser.add_argument('--num_envs', type=int, default=8)
     parser.add_argument('--record_video', type=int, default=0)
     parser.add_argument('--encoder_feature_dim', type=int, default=50)

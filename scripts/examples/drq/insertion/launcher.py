@@ -2,7 +2,7 @@ from experiments.utils import generate_run_commands, generate_base_command, dict
 from scripts.examples.drq.insertion import experiment as exp
 import argparse
 
-PROJECT_NAME = 'InsertionDrQv2-7Aug'
+PROJECT_NAME = 'InsertionDrQv2-8Aug'
 
 _applicable_configs = {
     'total_steps': [500_000],
@@ -13,7 +13,7 @@ _applicable_configs = {
     'project_name': [PROJECT_NAME],
     'task': ['swingup_sparse'],
     'action_cost': [0.0],
-    'sig': [0.1]
+    'sig': [0.2]
 }
 
 _applicable_configs_disagreement_drq = {'alg': ['DisagreementDrQ'],
@@ -58,9 +58,9 @@ all_flags_combinations = dict_permutations(_applicable_configs_drq) \
                          + dict_permutations(_applicable_configs_drqv2) \
                          + dict_permutations(_applicable_configs_disagreement_max_ent_drq)
 
+all_flags_combinations = dict_permutations(_applicable_configs_disagreement_drqv2) \
+                         + dict_permutations(_applicable_configs_drqv2)
 
-all_flags_combinations = dict_permutations(_applicable_configs_drqv2) \
-                         + dict_permutations(_applicable_configs_disagreement_drqv2)
 
 def main(args):
     command_list = []
@@ -82,7 +82,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_cpus', type=int, default=5, help='number of cpus to use')
+    parser.add_argument('--num_cpus', type=int, default=6, help='number of cpus to use')
     parser.add_argument('--num_gpus', type=int, default=1, help='number of gpus to use')
     parser.add_argument('--mode', type=str, default='euler', help='how to launch the experiments')
     parser.add_argument('--long_run', default=True, action="store_true")
