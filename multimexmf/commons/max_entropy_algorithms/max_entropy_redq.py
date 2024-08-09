@@ -1,13 +1,14 @@
 import collections
+import copy
 
 import torch
 from torch.nn import functional as F
-from stable_baselines3.sac import SAC
 from stable_baselines3.sac.policies import get_action_dim
 from typing import Optional, Union, Dict, Type
 import numpy as np
 import torch as th
-from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer, EPS
+from multimexmf.commons.redq import REDQ, get_probabilistic_num_min
+from multimexmf.models.pretrain_models import EnsembleMLP, Normalizer, MultiHeadGaussianEnsemble, EPS
 from stable_baselines3.common.type_aliases import Schedule
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.utils import polyak_update
@@ -15,7 +16,7 @@ from multimexmf.commons.intrinsic_reward_algorithms.utils import DisagreementInt
 from stable_baselines3.common.type_aliases import MaybeCallback
 
 
-class MaxEntropySAC(SAC):
+class MaxEntropyREDQ(REDQ):
     def __init__(self,
                  ensemble_model_kwargs: Dict,
                  ensemble_type: Type[torch.nn.Module] = EnsembleMLP,
@@ -25,6 +26,7 @@ class MaxEntropySAC(SAC):
                  learn_rewards: bool = True,
                  dynamics_entropy_schedule: Optional[Schedule] = None,
                  dyn_entropy_scale: float = -1,
+                 model_update_delay: int = -1,
                  target_info_tau: float = 0.25,
                  target_info_gain: Union[str, float] = 'auto',
                  *args,
@@ -37,9 +39,9 @@ class MaxEntropySAC(SAC):
         self._setup_ensemble_model(
             ensemble_model_kwargs=ensemble_model_kwargs,
             intrinsic_reward_weights=intrinsic_reward_weights,
+            ensemble_type=ensemble_type,
             device=self.device,
             agg_intrinsic_reward='mean',
-            ensemble_type=ensemble_type,
         )
         if dynamics_entropy_schedule is None:
             self.dynamics_entropy_schedule = lambda x: float(x > 0.5)
@@ -51,6 +53,10 @@ class MaxEntropySAC(SAC):
             self.dyn_entropy_scale = get_action_dim(self.action_space)
         else:
             self.dyn_entropy_scale = dyn_entropy_scale
+        if model_update_delay > 0:
+            self.model_update_delay = model_update_delay
+        else:
+            self.model_update_delay = copy.deepcopy(self.policy_update_delay)
 
         if isinstance(target_info_gain, str):
             if target_info_gain == 'auto':
@@ -169,6 +175,43 @@ class MaxEntropySAC(SAC):
         else:
             return entropy * self.dyn_entropy_scale
 
+    def get_redq_q_target_no_grad(self, next_observations, rewards, done, ent_coef):
+        # compute REDQ Q target, depending on the agent's Q target mode
+        # allow min as a float:
+        dyn_ent_weight = self.get_dynamics_entropy_weight()
+        with torch.no_grad():
+            next_actions, next_log_prob = self.actor.action_log_prob(next_observations)
+            next_log_prob = next_log_prob.reshape(-1, 1)
+            next_features = self.extract_features(next_observations)
+            # get entropy of transitions
+            inp = th.cat([next_features, next_actions], dim=-1)
+            inp = self.input_normalizer.normalize(inp)
+            next_obs_dynamics_entropy = self.get_intrinsic_reward(
+                inp=inp,
+                labels=None,
+            ).reshape(-1, 1)
+            if self.q_target_mode == 'min':
+                num_mins_to_use = get_probabilistic_num_min(self.num_min_critics)
+                sample_idxs = np.random.choice(self.n_critics, num_mins_to_use, replace=False)
+                """Q target is min of a subset of Q values"""
+
+                q_prediction_next_cat = torch.cat(self.critic_target(next_observations,
+                                                                      next_actions), 1)[..., sample_idxs]
+                min_q, _ = torch.min(q_prediction_next_cat, dim=1, keepdim=True)
+                next_q_with_log_prob = min_q - ent_coef * (-next_obs_dynamics_entropy * dyn_ent_weight
+                                                            + next_log_prob.reshape(-1, 1))
+                y_q = rewards + self.gamma * (1 - done) * next_q_with_log_prob
+            elif self.q_target_mode == 'ave':
+                """Q target is average of all Q values"""
+                q_values = th.cat(self.critic_target(
+                    next_observations, next_actions), dim=1).mean(dim=1).reshape(-1, 1)
+                next_q_with_log_prob = q_values - ent_coef * (-next_obs_dynamics_entropy * dyn_ent_weight
+                                                            + next_log_prob.reshape(-1, 1))
+                y_q = rewards + self.gamma * (1 - done) * next_q_with_log_prob
+            else:
+                raise NotImplementedError
+        return y_q
+
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
@@ -190,74 +233,30 @@ class MaxEntropySAC(SAC):
 
         self._update_ensemble_normalizers(batch_size)
 
+        # Profile the training step
         for gradient_step in range(gradient_steps):
-            # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
                 self.actor.reset_noise()
 
-            # Action by the current actor for the sampled state
-            actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
-            log_prob = log_prob.reshape(-1, 1)
-
-            features = self.extract_features(replay_data.observations)
-            inp = th.cat([features, actions_pi], dim=-1)
-            inp = self.input_normalizer.normalize(inp)
-            dynamics_entropy = self.get_intrinsic_reward(
-                inp=inp,
-                labels=None,
-            ).reshape(-1, 1)
-            batch_entropy = dynamics_entropy.mean()
-            dynamics_info_gain.append(batch_entropy.item())
-            batch_entropy = batch_entropy * dyn_ent_weight
-            target_info_gain.append(self.target_info_gain.item())
-            total_entropy = -log_prob + dynamics_entropy * dyn_ent_weight
-            ent_coef_loss = None
-            if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
+            if self.log_ent_coef is not None:
                 # Important: detach the variable from the graph
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (-total_entropy +
-                                                       self.target_info_gain + self.target_entropy).detach()).mean()
-                ent_coef_losses.append(ent_coef_loss.item())
             else:
                 ent_coef = self.ent_coef_tensor
 
             ent_coefs.append(ent_coef.item())
 
-            # Optimize entropy coefficient, also called
-            # entropy temperature or alpha in the paper
-            if ent_coef_loss is not None and self.ent_coef_optimizer is not None:
-                self.ent_coef_optimizer.zero_grad()
-                ent_coef_loss.backward()
-                self.ent_coef_optimizer.step()
-
-            with th.no_grad():
-                # Select action according to policy
-                next_actions, next_log_prob = self.actor.action_log_prob(replay_data.next_observations)
-                # Compute the next Q values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-                next_features = self.extract_features(replay_data.next_observations)
-                # get entropy of transitions
-                inp = th.cat([next_features, next_actions], dim=-1)
-                inp = self.input_normalizer.normalize(inp)
-                next_obs_dynamics_entropy = self.get_intrinsic_reward(
-                    inp=inp,
-                    labels=None,
-                ).reshape(-1, 1)
-
-                # add entropy term
-                next_q_values = next_q_values - ent_coef * (-next_obs_dynamics_entropy * dyn_ent_weight
-                                                            + next_log_prob.reshape(-1, 1))
-                # td error + entropy term
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
-
-            # Get current Q-values estimates for each critic network
-            # using action from the replay buffer
+            """Q loss"""
+            target_q_values = self.get_redq_q_target_no_grad(replay_data.next_observations,
+                                                             replay_data.rewards,
+                                                             replay_data.dones,
+                                                             ent_coef=ent_coef,
+                                                             )
             current_q_values = self.critic(replay_data.observations, replay_data.actions)
 
             # Compute critic loss
@@ -270,52 +269,81 @@ class MaxEntropySAC(SAC):
             critic_loss.backward()
             self.critic.optimizer.step()
 
-            # Compute actor loss
-            # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
-            # Min over all critic networks
-            q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
+            if ((gradient_step + 1) % self.policy_update_delay == 0) or gradient_step == gradient_steps - 1:
+                # get policy loss
+                actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
+                log_prob = log_prob.reshape(-1, 1)
+                # get dynamics entropy
+                features = self.extract_features(replay_data.observations)
+                inp = th.cat([features, actions_pi], dim=-1)
+                inp = self.input_normalizer.normalize(inp)
+                dynamics_entropy = self.get_intrinsic_reward(
+                    inp=inp,
+                    labels=None,
+                ).reshape(-1, 1)
+                batch_entropy = dynamics_entropy.mean()
+                dynamics_info_gain.append(batch_entropy.item())
+                target_info_gain.append(self.target_info_gain.item())
+                batch_entropy = batch_entropy * dyn_ent_weight
+                total_entropy = -log_prob + dynamics_entropy * dyn_ent_weight
+                q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
+                qf_pi = th.mean(q_values_pi, dim=1, keepdim=True)
+                actor_loss = (-ent_coef * total_entropy - qf_pi).mean()
+                actor_losses.append(actor_loss.item())
 
-            min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-            actor_loss = (-ent_coef * total_entropy - min_qf_pi).mean()
-            actor_losses.append(actor_loss.item())
+                # Optimize the actor
+                self.actor.optimizer.zero_grad()
+                actor_loss.backward()
+                self.actor.optimizer.step()
 
-            # Optimize the actor
-            self.actor.optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor.optimizer.step()
+                if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
+                    # Important: detach the variable from the graph
+                    # so we don't change it with other losses
+                    # see https://github.com/rail-berkeley/softlearning/issues/60
+                    ent_coef_loss = -(self.log_ent_coef * (-total_entropy +
+                                                           self.target_info_gain + self.target_entropy).detach()).mean()
+                    ent_coef_losses.append(ent_coef_loss.item())
+                    self.ent_coef_optimizer.zero_grad()
+                    ent_coef_loss.backward()
+                    self.ent_coef_optimizer.step()
 
-            # Update target networks
+                self.target_info_gain = (1 - self.target_info_tau) * self.target_info_gain + \
+                                        self.target_info_tau * batch_entropy.detach()
+
+            if ((gradient_step + 1) % self.model_update_delay == 0) or gradient_step == gradient_steps - 1:
+                # ensemble model training
+                features = self.extract_features(replay_data.observations)
+                inp = th.cat([features, replay_data.actions], dim=-1)
+                inp = self.input_normalizer.normalize(inp)
+
+                labels = self._get_ensemble_targets(replay_data.next_observations, replay_data.observations,
+                                                    replay_data.rewards)
+                for key, y in labels.items():
+                    # if gradient_step == normalization_index:
+                    #    self.output_normalizers[key].update(y)
+                    labels[key] = self.output_normalizers[key].normalize(y)
+                self.ensemble_model.train()
+                self.ensemble_model.optimizer.zero_grad()
+                prediction = self.ensemble_model(inp)
+                loss = self.ensemble_model.loss(prediction=prediction, target=labels)
+                stacked_losses = []
+                for key, val in loss.items():
+                    ensemble_losses[key].append(val.item())
+                    stacked_losses.append(val)
+                stacked_losses = th.stack(stacked_losses)
+                total_loss = stacked_losses.mean()
+                total_loss.backward()
+                self.ensemble_model.optimizer.step()
+                self.ensemble_model.eval()
+
+                    # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
                 # Copy running stats, see GH issue #996
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
-                self.target_info_gain = (1 - self.target_info_tau) * self.target_info_gain + \
-                                        self.target_info_tau * batch_entropy.detach()
+
 
             # ensemble model training
-            inp = th.cat([features, replay_data.actions], dim=-1)
-            inp = self.input_normalizer.normalize(inp)
-
-            labels = self._get_ensemble_targets(replay_data.next_observations, replay_data.observations,
-                                                replay_data.rewards)
-            for key, y in labels.items():
-                # if gradient_step == normalization_index:
-                #    self.output_normalizers[key].update(y)
-                labels[key] = self.output_normalizers[key].normalize(y)
-            self.ensemble_model.train()
-            self.ensemble_model.optimizer.zero_grad()
-            prediction = self.ensemble_model(inp)
-            loss = self.ensemble_model.loss(prediction=prediction, target=labels)
-            stacked_losses = []
-            for key, val in loss.items():
-                ensemble_losses[key].append(val.item())
-                stacked_losses.append(val)
-            stacked_losses = th.stack(stacked_losses)
-            total_loss = stacked_losses.mean()
-            total_loss.backward()
-            self.ensemble_model.optimizer.step()
-            self.ensemble_model.eval()
-
         self._n_updates += gradient_steps
         self.ensemble_model.train(False)
 
@@ -354,11 +382,11 @@ class MaxEntropySAC(SAC):
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "MaxEntSac",
+        tb_log_name: str = "MaxEntDro",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ):
-        return super().learn(
+        super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -373,8 +401,10 @@ if __name__ == '__main__':
     from stable_baselines3.common.callbacks import EvalCallback
     from gymnasium.envs.classic_control.pendulum import PendulumEnv
     from gymnasium.wrappers.time_limit import TimeLimit
+    from multimexmf.models.pretrain_models import DropoutEnsemble
     from typing import Optional
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
+
 
     class CustomPendulumEnv(PendulumEnv):
         def __init__(self, *args, **kwargs):
@@ -440,32 +470,32 @@ if __name__ == '__main__':
         deterministic=True,
     )
     algorithm_kwargs = {
-        'policy': 'MlpPolicy',
         # 'train_freq': 32,
         # 'gradient_steps': 32,
         'learning_rate': 1e-3,
         'verbose': 1,
-        'gradient_steps': -1,
     }
 
     ensemble_model_kwargs = {
         'learn_std': False,
         'optimizer_kwargs': {'lr': 3e-4, 'weight_decay': 0.0},
+        'features': (64, 64),
     }
     maximize_entropy = True
     if maximize_entropy:
-        algorithm = MaxEntropySAC(
+        algorithm = MaxEntropyREDQ(
             env=vec_env,
+            ensemble_type=DropoutEnsemble,
             ensemble_model_kwargs=ensemble_model_kwargs,
-            dynamics_entropy_schedule=lambda x: float(x > 0.0),
+            model_update_delay=20,
             **algorithm_kwargs
         )
     else:
-        algorithm = SAC(
+        algorithm = REDQ(
             env=vec_env,
             **algorithm_kwargs,
         )
     algorithm.learn(
-        total_timesteps=100_000,
+        total_timesteps=50_000,
         # callback=eval_callback,
     )

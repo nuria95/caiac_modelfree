@@ -32,7 +32,7 @@ class MaxEntDrQ(DrQ):
                  predict_reward: bool = True,
                  train_ensemble_with_target: bool = True,
                  dynamics_entropy_schedule: Optional[Schedule] = None,
-                 scale_dyn_entropy_with_action_dim: bool = True,
+                 dyn_entropy_scale: float = -1,
                  target_info_tau: float = 0.25,
                  target_info_gain: Union[str, float] = 'auto',
                  img_obs_pooling_params: Optional[dict] = None,
@@ -56,10 +56,10 @@ class MaxEntDrQ(DrQ):
         else:
             self.dynamics_entropy_schedule = dynamics_entropy_schedule
 
-        if scale_dyn_entropy_with_action_dim:
+        if dyn_entropy_scale < 0:
             self.dyn_entropy_scale = get_action_dim(self.action_space)
         else:
-            self.dyn_entropy_scale = 1.0
+            self.dyn_entropy_scale = dyn_entropy_scale
 
         if isinstance(target_info_gain, str):
             if target_info_gain == 'auto':
