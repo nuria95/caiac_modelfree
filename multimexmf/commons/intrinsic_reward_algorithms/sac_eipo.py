@@ -23,7 +23,7 @@ class SACEipo(SAC):
                  pred_diff: bool = True,
                  intrinsic_reward_model: Optional[Type[BaseIntrinsicReward]] = None,
                  extrinsic_reward_weight: Union[float, str] = 'auto',
-                 max_intrinsic_reward_lambda: float = 10 ** 5,
+                 max_intrinsic_reward_lambda: float = 10 ** 8,
                  normalize_intrinsic_reward: bool = True,
                  *args,
                  **kwargs

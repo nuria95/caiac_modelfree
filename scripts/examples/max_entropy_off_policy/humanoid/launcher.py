@@ -1,15 +1,16 @@
 from experiments.utils import generate_run_commands, generate_base_command, dict_permutations
-from scripts.examples.redq.humanoid import experiment as exp
+from scripts.examples.max_entropy_off_policy.humanoid import experiment as exp
 import argparse
 
-PROJECT_NAME = 'MaxEntHumanoid-6Aug'
+PROJECT_NAME = 'MaxEntHumanoid-8Aug'
 
 _applicable_configs = {
-    'total_steps': [500_000],
+    'total_steps': [1_000_000],
     'num_envs': [1],
     'normalize': [0],
     'seed': list(range(5)),
     'project_name': [PROJECT_NAME],
+    'entropy_scale': [-1],
 }
 
 _applicable_configs_max_ent_redq = {'alg': ['MaxEntropyREDQ'],
@@ -24,15 +25,12 @@ _applicable_configs_sac = {'alg': ['SAC'],
 _applicable_configs_redq = {'alg': ['REDQ'],
                             } | _applicable_configs
 
-all_flags_combinations = dict_permutations(_applicable_configs_max_ent_redq) \
-                         + dict_permutations(_applicable_configs_redq) \
-                         + dict_permutations(_applicable_configs_sac) \
-                         + dict_permutations(_applicable_configs_max_ent_sac)
+all_flags_combinations = dict_permutations(_applicable_configs_max_ent_sac)
 
 
 def main(args):
     command_list = []
-    logs_dir = '../'
+    logs_dir = '../../redq/'
     if args.mode == 'euler':
         logs_dir = '/cluster/scratch/'
         logs_dir += 'sukhijab' + '/' + PROJECT_NAME + '/'

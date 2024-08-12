@@ -22,14 +22,20 @@ def experiment(
         num_envs: int = 8,
         normalize: bool = False,
         seed: int = 0,
+        entropy_scale: float = -1,
 ):
     tb_dir = logs_dir + 'runs'
 
+    from multimexmf.envs.dm2gym import DMCGym
+    from multimexmf.envs.action_repeat import ActionRepeat
+    from multimexmf.envs.action_cost import ActionCost
+
     config = dict(
-        alg=alg,
+        alg=alg + 'Auto',
         total_steps=total_steps,
         num_envs=num_envs,
         normalize=normalize,
+        entropy_scale=entropy_scale,
     )
 
     # wandb.tensorboard.patch(root_logdir=tb_dir)
@@ -43,9 +49,18 @@ def experiment(
     )
     normalize = normalize
 
-    vec_env = make_vec_env("Humanoid-v4", n_envs=num_envs, seed=seed, wrapper_class=TimeLimit,
-                           env_kwargs={'render_mode': 'rgb_array'},
-                           wrapper_kwargs={'max_episode_steps': 1_000})
+    env = lambda: TimeLimit(
+        ActionRepeat(
+            ActionCost(DMCGym(
+                domain='humanoid',
+                task='run',
+                render_mode='rgb_array',
+            )),
+            repeat=2, return_total_reward=True),
+        max_episode_steps=1_000)
+
+    vec_env = make_vec_env(env, n_envs=num_envs, seed=seed)
+    eval_env = make_vec_env(env, n_envs=num_envs, seed=seed + 1_000)
     if normalize:
         vec_env = VecNormalize(venv=vec_env)
 
@@ -58,6 +73,7 @@ def experiment(
         'tensorboard_log': f"{tb_dir}/{run.id}",
         'gradient_steps': -1,
         'learning_starts': 5_000,
+        'learning_rate': 1e-4,
     }
 
     if alg == 'SAC':
@@ -78,14 +94,12 @@ def experiment(
     elif alg == 'MaxEntropySAC':
         ensemble_model_kwargs = {
             'learn_std': False,
-            'optimizer_kwargs': {'lr': 3e-4, 'weight_decay': 0.0},
+            'optimizer_kwargs': {'lr': 1e-4, 'weight_decay': 0.0},
         }
-        dynnamics_entropy_schedule = lambda x: float(x > 0.0)
         algorithm = MaxEntropySAC(
             env=vec_env,
             seed=seed,
             ensemble_model_kwargs=ensemble_model_kwargs,
-            dynamics_entropy_schedule=dynnamics_entropy_schedule,
             **algorithm_kwargs,
         )
     elif alg == 'MaxEntropyREDQ':
@@ -140,6 +154,7 @@ def main(args):
         num_envs=args.num_envs,
         normalize=bool(args.normalize),
         seed=args.seed,
+        entropy_scale=args.entropy_scale,
     )
 
 
@@ -154,6 +169,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_envs', type=int, default=1)
     parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--entropy_scale', type=float, default=-1)
     parser.add_argument('--exp_result_folder', type=str, default=None)
 
     args = parser.parse_args()
