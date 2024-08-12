@@ -481,8 +481,8 @@ class SACEipo(SAC):
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
         if len(extrinsic_reward_weight_losses) > 0:
-            self.logger.record("train/int_reward_lambda_losses", np.mean(extrinsic_reward_weight_losses))
-        self.logger.record("train/int_reward_lambda", np.mean(extrinsic_reward_weights))
+            self.logger.record("train/extrinsic_reward_weight_loss", np.mean(extrinsic_reward_weight_losses))
+        self.logger.record("train/extrinsic_reward_weight", np.mean(extrinsic_reward_weights))
 
     def learn(
             self,
