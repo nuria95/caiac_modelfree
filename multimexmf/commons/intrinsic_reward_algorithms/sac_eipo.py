@@ -71,6 +71,7 @@ class SACEipo(SAC):
             self.lr_schedule,
             **self.policy_kwargs,
         )
+        self.exploration_policy.to(self.device)
         self._create_exploitation_aliases()
 
         self.exploitation_batch_norm_stats = copy.deepcopy(self.batch_norm_stats)
