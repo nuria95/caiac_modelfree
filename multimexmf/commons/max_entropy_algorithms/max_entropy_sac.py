@@ -22,12 +22,14 @@ class MaxEntropySAC(SAC):
                  normalize_ensemble_training: bool = True,
                  pred_diff: bool = True,
                  learn_rewards: bool = True,
+                 normalize_dynamics_entropy: bool = True,
                  dyn_entropy_scale: Union[str, float] = 'auto',
                  *args,
                  **kwargs
                  ):
         self.dyn_entropy_scale = dyn_entropy_scale
         self.normalize_ensemble_training = normalize_ensemble_training
+        self.normalize_dynamics_entropy = normalize_dynamics_entropy
         self.pred_diff = pred_diff
         self.learn_rewards = learn_rewards
         super().__init__(*args, **kwargs)
@@ -62,6 +64,8 @@ class MaxEntropySAC(SAC):
             output_normalizers[key] = Normalizer(input_dim=val.shape[-1], update=self.normalize_ensemble_training,
                                                  device=device)
         self.output_normalizers = output_normalizers
+        self.entropy_normalizer = Normalizer(input_dim=1, update=self.normalize_dynamics_entropy,
+                                             device=device)
 
     def _setup_ensemble_model(self,
                               ensemble_model_kwargs: Dict,
@@ -203,6 +207,8 @@ class MaxEntropySAC(SAC):
                 inp=total_inp,
                 labels=None,
             ).reshape(-1, 1)
+            self.entropy_normalizer.update(dynamics_entropy.detach())
+            dynamics_entropy = self.entropy_normalizer.normalize(dynamics_entropy)
 
             dynamics_entropy, target_dynamics_entropy = dynamics_entropy[:batch_size], \
                 dynamics_entropy[batch_size:]
@@ -259,6 +265,7 @@ class MaxEntropySAC(SAC):
                     inp=inp,
                     labels=None,
                 ).reshape(-1, 1)
+                next_obs_dynamics_entropy = self.entropy_normalizer.normalize(next_obs_dynamics_entropy)
                 next_state_entropy = dyn_scale * next_obs_dynamics_entropy \
                                      - ent_coef * next_log_prob.reshape(-1, 1)
                 # add entropy term
@@ -387,6 +394,7 @@ if __name__ == '__main__':
     from typing import Optional
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
 
+
     class CustomPendulumEnv(PendulumEnv):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -463,6 +471,6 @@ if __name__ == '__main__':
             **algorithm_kwargs,
         )
     algorithm.learn(
-        total_timesteps=30_000,
+        total_timesteps=500_000,
         # callback=eval_callback,
     )
