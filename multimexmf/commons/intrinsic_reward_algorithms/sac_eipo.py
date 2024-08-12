@@ -22,8 +22,8 @@ class SACEipo(SAC):
                  normalize_ensemble_training: bool = True,
                  pred_diff: bool = True,
                  intrinsic_reward_model: Optional[Type[BaseIntrinsicReward]] = None,
-                 intrinsic_reward_lambda: Union[float, str] = 'auto',
-                 max_intrinsic_reward_lambda: float = 10 ** 7,
+                 extrinsic_reward_weight: Union[float, str] = 'auto',
+                 max_intrinsic_reward_lambda: float = 10 ** 5,
                  normalize_intrinsic_reward: bool = True,
                  *args,
                  **kwargs
@@ -32,7 +32,7 @@ class SACEipo(SAC):
         self.pred_diff = pred_diff
         self.exploitation_ent_coef_optimizer: Optional[th.optim.Adam] = None
         self.exploitation_log_ent_coef = None
-        self.intrinsic_reward_lambda = intrinsic_reward_lambda
+        self.extrinsic_reward_weight = extrinsic_reward_weight
         self.max_intrinsic_reward_lambda = max_intrinsic_reward_lambda
         self.normalize_intrinsic_reward = normalize_intrinsic_reward
         super().__init__(*args, **kwargs)
@@ -46,17 +46,17 @@ class SACEipo(SAC):
 
     def _setup_model(self):
         super()._setup_model()
-        if self.intrinsic_reward_lambda == 'auto':
-            self.log_intrinsic_reward_lambda = th.log(th.ones(1, device=self.device)).requires_grad_(True)
+        if self.extrinsic_reward_weight == 'auto':
+            self.log_extrinsic_reward_weight = th.log(th.ones(1, device=self.device)).requires_grad_(True)
             self.max_log_intrinsic_reward_lambda = th.log(th.ones(1, device=self.device)
                                                           * self.max_intrinsic_reward_lambda)
-            self.intrinsic_reward_lambda_optimizer = th.optim.Adam([self.log_intrinsic_reward_lambda],
+            self.extrinsic_reward_weight_optimizer = th.optim.Adam([self.log_extrinsic_reward_weight],
                                                                    lr=self.lr_schedule(1))
-            self.intrinsic_reward_lambda = None
+            self.extrinsic_reward_weight = None
         else:
-            self.intrinsic_reward_lambda = th.tensor([self.intrinsic_reward_lambda]).squeeze()
-            self.intrinsic_reward_lambda_optimizer = None
-            self.log_intrinsic_reward_lambda = None
+            self.extrinsic_reward_weight = th.tensor([self.extrinsic_reward_weight], device=self.device).squeeze()
+            self.extrinsic_reward_weight_optimizer = None
+            self.log_extrinsic_reward_weight = None
 
         self.exploitation_policy = self.policy_class(
             self.observation_space,
@@ -65,23 +65,26 @@ class SACEipo(SAC):
             **self.policy_kwargs,
         )
         self.exploitation_policy.to(self.device)
+        self.exploration_policy = self.policy_class(
+            self.observation_space,
+            self.action_space,
+            self.lr_schedule,
+            **self.policy_kwargs,
+        )
         self._create_exploitation_aliases()
 
         self.exploitation_batch_norm_stats = copy.deepcopy(self.batch_norm_stats)
         self.exploitation_batch_norm_stats_target = copy.deepcopy(self.batch_norm_stats_target)
-        self.exploitation_target_entropy = copy.deepcopy(self.target_entropy)
 
-        if self.ent_coef_optimizer is not None:
-            self.exploitation_log_ent_coef = copy.deepcopy(self.log_ent_coef)
-            self.exploitation_ent_coef_optimizer = th.optim.Adam([self.exploitation_log_ent_coef],
-                                                                 lr=self.lr_schedule(1))
-        else:
-            self.exploitation_ent_coef_tensor = copy.deepcopy(self.ent_coef_tensor)
+        self.exploration_batch_norm_stats = copy.deepcopy(self.batch_norm_stats)
+        self.exploration_batch_norm_stats_target = copy.deepcopy(self.batch_norm_stats_target)
 
     def _create_exploitation_aliases(self):
         self.exploitation_actor = self.exploitation_policy.actor
         self.exploitation_critic = self.exploitation_policy.critic
         self.exploitation_critic_target = self.exploitation_policy.critic_target
+        self.exploration_critic = self.exploration_policy.critic
+        self.exploration_critic_target = self.exploration_policy.critic_target
 
     def _setup_normalizer(self, input_dim: int, output_dict: Dict, device: th.device):
         self.input_normalizer = Normalizer(input_dim=input_dim, update=self.normalize_ensemble_training,
@@ -186,27 +189,29 @@ class SACEipo(SAC):
                 self.output_normalizers[key].update(y)
 
     def train_exploitation_critic(self, replay_data):
+        """Train policy and critic for maximizing only the extrinsic reward.
+            Policy is not used for exploration in the real environment -> entropy term is not required for this policy.
+        """
         if self.use_sde:
             self.exploitation_actor.noise()
 
         actions_pi, log_prob = self.exploitation_actor.action_log_prob(replay_data.observations)
-        log_prob = log_prob.reshape(-1, 1)
 
-        ent_coef_loss = None
-        if self.exploitation_ent_coef_optimizer is not None and self.exploitation_log_ent_coef is not None:
-            # Important: detach the variable from the graph
-            # so we don't change it with other losses
-            # see https://github.com/rail-berkeley/softlearning/issues/60
-            ent_coef = th.exp(self.exploitation_log_ent_coef.detach())
-            ent_coef_loss = -(self.exploitation_log_ent_coef * (log_prob +
-                                                                self.exploitation_target_entropy).detach()).mean()
-        else:
-            ent_coef = self.exploitation_ent_coef_tensor
+        # ent_coef_loss = None
+        # if self.exploitation_ent_coef_optimizer is not None and self.exploitation_log_ent_coef is not None:
+        #     # Important: detach the variable from the graph
+        #     # so we don't change it with other losses
+        #     # see https://github.com/rail-berkeley/softlearning/issues/60
+        #     ent_coef = th.exp(self.exploitation_log_ent_coef.detach())
+        #     ent_coef_loss = -(self.exploitation_log_ent_coef * (log_prob +
+        #                                                         self.exploitation_target_entropy).detach()).mean()
+        # else:
+        #     ent_coef = self.exploitation_ent_coef_tensor
 
-        if ent_coef_loss is not None and self.exploitation_ent_coef_optimizer is not None:
-            self.exploitation_ent_coef_optimizer.zero_grad()
-            ent_coef_loss.backward()
-            self.exploitation_ent_coef_optimizer.step()
+        # if ent_coef_loss is not None and self.exploitation_ent_coef_optimizer is not None:
+        #     self.exploitation_ent_coef_optimizer.zero_grad()
+        #     ent_coef_loss.backward()
+        #     self.exploitation_ent_coef_optimizer.step()
 
         with th.no_grad():
             # Select action according to policy
@@ -214,8 +219,6 @@ class SACEipo(SAC):
             # Compute the next Q values: min over all critics targets
             next_q_values = th.cat(self.exploitation_critic_target(replay_data.next_observations, next_actions), dim=1)
             next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-            # add entropy term
-            next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
             # td error + entropy term
             target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
@@ -237,16 +240,16 @@ class SACEipo(SAC):
         # Min over all critic networks
         q_values_pi = th.cat(self.exploitation_critic(replay_data.observations, actions_pi), dim=1)
         min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-        actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+        actor_loss = -min_qf_pi.mean()
 
         # Optimize the actor
         self.exploitation_actor.optimizer.zero_grad()
         actor_loss.backward()
         self.exploitation_actor.optimizer.step()
-
-        return ent_coef, ent_coef_loss, critic_loss, actor_loss, actions_pi, log_prob
+        return critic_loss, actor_loss
 
     def train_explore_exploit_policy(self, replay_data):
+        """Train policy to maximize intrinsic + extrinsic reward"""
         if self.use_sde:
             self.actor.noise()
         actions_pi, log_prob = self.actor.action_log_prob(replay_data.observations)
@@ -262,10 +265,10 @@ class SACEipo(SAC):
         else:
             ent_coef = self.ent_coef_tensor
 
-        if self.log_intrinsic_reward_lambda is not None:
-            intrinsic_reward_lambda = th.exp(self.log_intrinsic_reward_lambda.detach())
+        if self.log_extrinsic_reward_weight is not None:
+            extrinsic_reward_weight = th.exp(self.log_extrinsic_reward_weight.detach())
         else:
-            intrinsic_reward_lambda = self.intrinsic_reward_lambda
+            extrinsic_reward_weight = self.extrinsic_reward_weight
 
         # Optimize entropy coefficient, also called
         # entropy temperature or alpha in the paper
@@ -281,8 +284,9 @@ class SACEipo(SAC):
             next_q_values = th.cat(self.critic_target(
                 replay_data.next_observations, next_actions), dim=1)
             next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-            # add entropy term
-            next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
+            # Note: We only add entropy term for the exploration critic
+            target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+
             # td error + entropy term
             # relabel reward with exploration reward
             labels = self._get_ensemble_targets(replay_data.next_observations, replay_data.observations,
@@ -301,62 +305,78 @@ class SACEipo(SAC):
                 inp=inp,
                 labels=labels
             ).reshape(-1, 1)
-            self.int_reward_normalizer.update(rewards)
             rewards = self.int_reward_normalizer.normalize(rewards)
-            total_reward = replay_data.rewards + rewards / (1 + intrinsic_reward_lambda)
-            target_q_values = total_reward + (1 - replay_data.dones) * self.gamma * next_q_values
-            batch_int_reward = rewards.mean()
+            # termination flag is not used for exploration critic
+            next_q_exploration_values = th.cat(self.exploration_critic_target(
+                replay_data.next_observations, next_actions), dim=1)
+            next_q_exploration_values, _ = th.min(next_q_exploration_values, dim=1, keepdim=True)
+            # add entropy term
+            next_q_exploration_values = next_q_exploration_values - ent_coef * next_log_prob.reshape(-1, 1)
+            # no termination flag used for the exploration policy
+            target_exploration_q_values = rewards + self.gamma * next_q_exploration_values
 
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
         current_q_values = self.critic(replay_data.observations, replay_data.actions)
-
+        current_exploration_q_values = self.exploration_critic(replay_data.observations, replay_data.actions)
         # Compute critic loss
         critic_loss = 0.5 * sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
         assert isinstance(critic_loss, th.Tensor)  # for type checker
+        exploration_critic_loss = 0.5 * sum(F.mse_loss(current_q, target_exploration_q_values)
+                                            for current_q in current_exploration_q_values)
+        assert isinstance(exploration_critic_loss, th.Tensor)
 
         # Optimize the critic
         self.critic.optimizer.zero_grad()
         critic_loss.backward()
         self.critic.optimizer.step()
 
+        self.exploration_critic.optimizer.zero_grad()
+        exploration_critic_loss.backward()
+        self.exploration_critic.optimizer.step()
+
         # Compute actor loss
         # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
         # Min over all critic networks
         q_values_pi = th.cat(self.critic(replay_data.observations, actions_pi), dim=1)
         min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-        actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+        exploration_q_values = th.cat(self.exploration_critic(replay_data.observations, actions_pi), dim=1)
+        min_qf_explore_pi, _ = th.min(exploration_q_values, dim=1, keepdim=True)
+        min_qf_explore_pi = min_qf_explore_pi - ent_coef * log_prob
+        value = min_qf_pi + (min_qf_explore_pi / extrinsic_reward_weight)
+        actor_loss = -value.mean()
 
         # Optimize the actor
         self.actor.optimizer.zero_grad()
         actor_loss.backward()
         self.actor.optimizer.step()
-        return ent_coef, ent_coef_loss, intrinsic_reward_lambda, batch_int_reward, \
-            inp, labels, critic_loss, actor_loss, actions_pi, log_prob
+        return ent_coef, ent_coef_loss, extrinsic_reward_weight, rewards, \
+            inp, labels, critic_loss, exploration_critic_loss, actor_loss
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
         self.exploitation_policy.set_training_mode(True)
+        self.exploration_policy.set_training_mode(True)
         self.ensemble_model.train(True)
         # Update optimizers learning rate
         optimizers = [self.actor.optimizer, self.critic.optimizer,
-                      self.exploitation_actor.optimizer, self.exploitation_critic.optimizer
+                      self.exploitation_actor.optimizer, self.exploitation_critic.optimizer,
+                      self.exploration_critic.optimizer,
                       ]
         if self.ent_coef_optimizer is not None:
-            optimizers += [self.ent_coef_optimizer, self.exploitation_ent_coef_optimizer]
+            optimizers += [self.ent_coef_optimizer]
 
-        if self.intrinsic_reward_lambda_optimizer is not None:
-            optimizers += [self.intrinsic_reward_lambda_optimizer]
+        if self.extrinsic_reward_weight_optimizer is not None:
+            optimizers += [self.extrinsic_reward_weight_optimizer]
 
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
 
         ent_coef_losses, ent_coefs = [], []
-        int_reward_lambda_losses, int_reward_lambdas = [], []
-        actor_losses, critic_losses = [], []
+        extrinsic_reward_weight_losses, extrinsic_reward_weights = [], []
+        actor_losses, critic_losses, exploration_critic_losses = [], [], []
 
-        exploitation_ent_coef_losses, exploitation_ent_coefs = [], []
         exploitation_actor_losses, exploitation_critic_losses = [], []
         batch_intrinsic_reward = []
 
@@ -368,53 +388,62 @@ class SACEipo(SAC):
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
-            exploit_ent_coef, exploit_ent_coef_loss, exploit_critic_loss, exploit_actor_loss, \
-                expl_actions, expl_log_prob = self.train_exploitation_critic(replay_data)
-            exploitation_ent_coefs.append(exploit_ent_coef.item())
+            exploit_critic_loss, exploit_actor_loss = self.train_exploitation_critic(replay_data)
             exploitation_actor_losses.append(exploit_actor_loss.item())
             exploitation_critic_losses.append(exploit_critic_loss.item())
-            if exploit_ent_coef_loss is not None:
-                exploitation_ent_coef_losses.append(exploit_ent_coef_loss.item())
 
-            ent_coef, ent_coef_loss, intrinsic_reward_lambda, batch_int_reward, inp, labels, \
-                critic_loss, actor_loss, actions, log_prob = self.train_explore_exploit_policy(replay_data)
+            ent_coef, ent_coef_loss, extrinsic_reward_weight, int_rewards, inp, labels, \
+                critic_loss, exploration_critic_loss, actor_loss = self.train_explore_exploit_policy(replay_data)
+
+            self.int_reward_normalizer.update(int_rewards)
 
             ent_coefs.append(ent_coef.item())
             actor_losses.append(actor_loss.item())
             critic_losses.append(critic_loss.item())
-            batch_intrinsic_reward.append(batch_int_reward.item())
+            exploration_critic_losses.append(exploration_critic_loss.item())
+            batch_intrinsic_reward.append(int_rewards.mean().item())
             if ent_coef_loss is not None:
                 ent_coef_losses.append(ent_coef_loss.item())
-            int_reward_lambdas.append(intrinsic_reward_lambda.item())
+            extrinsic_reward_weights.append(extrinsic_reward_weight.item())
 
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+                polyak_update(self.exploration_critic.parameters(),
+                              self.exploration_critic_target.parameters(), self.tau)
                 # Copy running stats, see GH issue #996
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+                polyak_update(self.exploration_batch_norm_stats, self.exploration_batch_norm_stats_target, 1.0)
 
                 # repeat for exploration critic
                 polyak_update(self.exploitation_critic.parameters(), self.exploitation_critic_target.parameters(),
                               self.tau)
                 polyak_update(self.exploitation_batch_norm_stats, self.exploitation_batch_norm_stats_target, 1.0)
 
-            # Update lambda
-            if self.intrinsic_reward_lambda_optimizer is not None:
-                critic_value_actor = th.cat(self.exploitation_critic_target(replay_data.observations, actions), dim=1)
-                critic_value_actor, _ = th.min(critic_value_actor, dim=1, keepdim=True)
-                critic_value_actor = critic_value_actor - exploit_ent_coef * log_prob
+            # Update extrinsic reward weight
+            if self.extrinsic_reward_weight_optimizer is not None:
+                # get actions from policies
+                actions, _ = self.actor.action_log_prob(replay_data.next_observations)
+                expl_actions, _ = self.exploitation_actor.action_log_prob(replay_data.observations)
 
-                exploitation_actor_value = th.cat(self.exploitation_critic_target(replay_data.observations,
+                # take value for V^{\pi_{E+I}}_{E}: exploration + exploitation policy under
+                # its critic of extrinsic rewards
+                critic_value_actor = th.cat(self.critic(replay_data.observations, actions), dim=1)
+                critic_value_actor, _ = th.min(critic_value_actor, dim=1, keepdim=True)
+
+                # take value for V^{\pi_E}_{E}: exploitation policy under its critic of extrinsic reward
+                exploitation_actor_value = th.cat(self.exploitation_critic(replay_data.observations,
                                                                                   expl_actions), dim=1)
                 exploitation_actor_value, _ = th.min(exploitation_actor_value, dim=1, keepdim=True)
-                exploitation_actor_value = exploitation_actor_value - exploit_ent_coef * expl_log_prob
 
-                int_lambda_loss = torch.min(self.log_intrinsic_reward_lambda, self.max_log_intrinsic_reward_lambda) * \
+                # ensure that V^{\pi_{E+I}}_{E} = V^{\pi_E}_{E}
+                extrinsic_reward_weight_loss = torch.min(self.log_extrinsic_reward_weight,
+                                                         self.max_log_intrinsic_reward_lambda) * \
                                   ((critic_value_actor - exploitation_actor_value).mean().detach())
-                self.intrinsic_reward_lambda_optimizer.zero_grad()
-                int_lambda_loss.backward()
-                self.intrinsic_reward_lambda_optimizer.step()
-                int_reward_lambda_losses.append(int_lambda_loss.item())
+                self.extrinsic_reward_weight_optimizer.zero_grad()
+                extrinsic_reward_weight_loss.backward()
+                self.extrinsic_reward_weight_optimizer.step()
+                extrinsic_reward_weight_losses.append(extrinsic_reward_weight_loss.item())
 
             # ensemble model training
             self.ensemble_model.optimizer.zero_grad()
@@ -436,7 +465,6 @@ class SACEipo(SAC):
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
-        self.logger.record("train/exploitation_ent_coefs", np.mean(exploitation_ent_coefs))
         self.logger.record("train/exploitation_actor_losses", np.mean(exploitation_actor_losses))
         self.logger.record("train/exploitation_critic_losses", np.mean(exploitation_critic_losses))
         for key, val in ensemble_losses.items():
@@ -452,10 +480,9 @@ class SACEipo(SAC):
         self.logger.record("train/batch_intrinsic_reward", np.mean(batch_intrinsic_reward))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-            self.logger.record("train/exploitation_ent_coef_losses", np.mean(exploitation_ent_coef_losses))
-        if len(int_reward_lambda_losses) > 0:
-            self.logger.record("train/int_reward_lambda_losses", np.mean(int_reward_lambda_losses))
-        self.logger.record("train/int_reward_lambda", np.mean(int_reward_lambdas))
+        if len(extrinsic_reward_weight_losses) > 0:
+            self.logger.record("train/int_reward_lambda_losses", np.mean(extrinsic_reward_weight_losses))
+        self.logger.record("train/int_reward_lambda", np.mean(extrinsic_reward_weights))
 
     def learn(
             self,
@@ -485,7 +512,6 @@ if __name__ == '__main__':
     from multimexmf.commons.intrinsic_reward_algorithms.utils import \
         DisagreementIntrinsicReward
     from stable_baselines3.common.vec_env.vec_video_recorder import VecVideoRecorder
-
 
     class CustomPendulumEnv(PendulumEnv):
         def __init__(self, *args, **kwargs):
@@ -567,7 +593,7 @@ if __name__ == '__main__':
     if maximize_entropy:
         algorithm = SACEipo(
             env=vec_env,
-            intrinsic_reward_lambda=1.0,
+            extrinsic_reward_weight="auto",
             intrinsic_reward_model=DisagreementIntrinsicReward,
             ensemble_model_kwargs=ensemble_model_kwargs,
             **algorithm_kwargs
