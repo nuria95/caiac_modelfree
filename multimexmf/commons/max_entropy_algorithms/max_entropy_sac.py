@@ -24,6 +24,7 @@ class MaxEntropySAC(SAC):
                  learn_rewards: bool = True,
                  normalize_dynamics_entropy: bool = True,
                  dyn_entropy_scale: Union[str, float] = 'auto',
+                 init_dyn_entropy_scale: float = 1,
                  *args,
                  **kwargs
                  ):
@@ -31,6 +32,7 @@ class MaxEntropySAC(SAC):
         self.normalize_ensemble_training = normalize_ensemble_training
         self.normalize_dynamics_entropy = normalize_dynamics_entropy
         self.pred_diff = pred_diff
+        self.init_dyn_entropy_scale = init_dyn_entropy_scale
         self.learn_rewards = learn_rewards
         super().__init__(*args, **kwargs)
         self._setup_ensemble_model(
@@ -46,8 +48,10 @@ class MaxEntropySAC(SAC):
         super()._setup_model()
         self.actor_target = copy.deepcopy(self.actor)
         if self.dyn_entropy_scale == 'auto':
-            # we initialize the weight such that policy entropy and information gain are of similar orders.
-            self.log_dyn_entropy_scale = th.log(th.ones(1, device=self.device)).requires_grad_(True)
+            assert self.init_dyn_entropy_scale > 0
+            init_dyn_entropy_scale = self.init_dyn_entropy_scale
+            self.log_dyn_entropy_scale = th.log(th.ones(1, device=self.device)
+                                                * init_dyn_entropy_scale).requires_grad_(True)
             self.dyn_ent_scale_optimizer = th.optim.Adam([self.log_dyn_entropy_scale],
                                                          lr=self.lr_schedule(1))
             self.dyn_entropy_scale = None
