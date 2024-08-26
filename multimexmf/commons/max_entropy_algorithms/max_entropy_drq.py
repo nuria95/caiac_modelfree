@@ -3,10 +3,9 @@ import collections
 import torch.nn
 
 from multimexmf.commons.drq import DrQ
-from stable_baselines3.sac.policies import get_action_dim
 from typing import Optional, Union, Dict, Type
 from multimexmf.commons.intrinsic_reward_algorithms.utils import DisagreementIntrinsicReward
-from stable_baselines3.common.type_aliases import Schedule, MaybeCallback
+from stable_baselines3.common.type_aliases import MaybeCallback
 import torch as th
 from multimexmf.models.pretrain_models import Normalizer, EPS, EnsembleMLP
 from stable_baselines3.common.utils import polyak_update
@@ -24,54 +23,38 @@ class MaxEntDrQ(DrQ):
                  intrinsic_reward_weights: Optional[Dict] = None,
                  agg_intrinsic_reward: str = 'mean',
                  normalize_ensemble_training: bool = True,
+                 normalize_dyn_entropy: bool = True,
                  pred_diff: bool = False,
                  predict_img_embed: bool = True,
                  predict_tactile_embed: bool = True,
                  ens_obs_representation: str = 'full',
                  predict_state: bool = True,
                  predict_reward: bool = True,
+                 update_encoder_with_exploration_critic: bool = True,
                  train_ensemble_with_target: bool = True,
-                 dynamics_entropy_schedule: Optional[Schedule] = None,
-                 dyn_entropy_scale: float = -1,
-                 target_info_tau: float = 0.25,
-                 target_info_gain: Union[str, float] = 'auto',
                  img_obs_pooling_params: Optional[dict] = None,
                  tactile_obs_pooling_params: Optional[dict] = None,
+                 dyn_entropy_scale: Union[str, float] = 'auto',
+                 init_dyn_entropy_scale: float = 1,
+                 use_optimism: bool = False,
                  *args,
                  **kwargs):
+        self.dyn_entropy_scale = dyn_entropy_scale
+        self.init_dyn_entropy_scale = init_dyn_entropy_scale
         super().__init__(*args, **kwargs)
         self.ens_obs_representation = ens_obs_representation
         self.normalize_ensemble_training = normalize_ensemble_training
+        self.normalize_dyn_entropy = normalize_dyn_entropy
         self.pred_diff = pred_diff
         self.predict_img_embed = predict_img_embed
         self.predict_tactile_embed = predict_tactile_embed
         self.predict_state = predict_state
         self.predict_reward = predict_reward
+        self.train_ensemble_with_target = train_ensemble_with_target
         self.img_obs_pooling_params = img_obs_pooling_params
         self.tactile_obs_pooling_params = tactile_obs_pooling_params
-        self.train_ensemble_with_target = train_ensemble_with_target
-        if dynamics_entropy_schedule is None:
-            self.dynamics_entropy_schedule = lambda x: float(x > 0.5)
-            # return a 0 for dynamics entropy after 50 % of learning steps
-        else:
-            self.dynamics_entropy_schedule = dynamics_entropy_schedule
-
-        if dyn_entropy_scale < 0:
-            self.dyn_entropy_scale = get_action_dim(self.action_space)
-        else:
-            self.dyn_entropy_scale = dyn_entropy_scale
-
-        if isinstance(target_info_gain, str):
-            if target_info_gain == 'auto':
-                self.target_info_gain = torch.zeros(1).squeeze()
-                self.target_info_tau = target_info_tau
-            else:
-                raise NotImplementedError
-        elif isinstance(target_info_gain, float):
-            self.target_info_gain = torch.tensor([target_info_gain]).squeeze()
-            self.target_info_tau = 0.0
-        else:
-            raise NotImplementedError
+        self.use_optimism = use_optimism
+        self.update_encoder_with_exploration_critic = update_encoder_with_exploration_critic
         # self.obs_encoder_num_layers = obs_encoder_num_layers
         self._setup_ensemble_model(
             ensemble_model_kwargs=ensemble_model_kwargs,
@@ -81,8 +64,24 @@ class MaxEntDrQ(DrQ):
             ensemble_type=ensemble_type,
         )
 
-    def get_dynamics_entropy_weight(self):
-        return self.dynamics_entropy_schedule(self._current_progress_remaining)
+    def _setup_model(self) -> None:
+        super()._setup_model()
+        self.actor_target = self.policy.make_actor()
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_target.set_training_mode(False)
+
+        if self.dyn_entropy_scale == 'auto':
+            assert self.init_dyn_entropy_scale > 0
+            # we initialize the weight such that policy entropy and information gain are of similar orders.
+            self.log_dyn_entropy_scale = th.log(th.ones(1, device=self.device)
+                                                * self.init_dyn_entropy_scale).requires_grad_(True)
+            self.dyn_ent_scale_optimizer = th.optim.Adam([self.log_dyn_entropy_scale],
+                                                         lr=self.lr_schedule(1))
+            self.dyn_entropy_scale = None
+        else:
+            self.dyn_entropy_scale = th.tensor([self.dyn_entropy_scale]).squeeze()
+            self.dyn_ent_scale_optimizer = None
+            self.log_dyn_entropy_scale = None
 
     def _extract_obs_representation_for_ensemble(self, obs):
         if self.ens_obs_representation == 'full':
@@ -117,12 +116,14 @@ class MaxEntDrQ(DrQ):
             output_normalizers[key] = Normalizer(input_dim=val.shape[-1], update=self.normalize_ensemble_training,
                                                  device=device)
         self.output_normalizers = output_normalizers
+        self.dyn_entropy_normalizer = Normalizer(input_dim=1, update=self.normalize_dyn_entropy,
+                                                 device=device)
 
     def _setup_ensemble_model(self,
                               ensemble_model_kwargs: Dict,
                               intrinsic_reward_weights: Dict,
                               device: th.device,
-                              ensemble_type: Type[torch.nn.Module],
+                              ensemble_type: Type[torch.nn.Module] = EnsembleMLP,
                               agg_intrinsic_reward: str = 'mean',
                               ) -> None:
         # setup encoders for observations that give target embeddings for the ensemble to learn
@@ -163,7 +164,6 @@ class MaxEntDrQ(DrQ):
 
     def _setup_encoders_for_ensemble_targets(self):
         self._has_encoders_for_ensemble_targets = False
-        # target_encoder_params = []
         if self.policy.img_encoder is not None:
             if self.predict_img_embed:
                 if self.img_obs_pooling_params is not None:
@@ -243,9 +243,31 @@ class MaxEntDrQ(DrQ):
         entropy = self.intrinsic_reward_model(inp=inp, labels=labels)
         if not self.ensemble_model.learn_std:
             info_gain = entropy - torch.log(torch.ones_like(entropy) * EPS)
-            return info_gain * self.dyn_entropy_scale
+            return info_gain
         else:
-            return entropy * self.dyn_entropy_scale
+            return entropy
+
+    def get_actor_and_target_entropy(self, obs, detach: bool = False, use_target: bool = False):
+        obs = obs.detach()
+        actions_pi, log_probs = self.actor.action_log_prob(obs)
+
+        state = self._get_state_from_embedded_obs(obs, use_target_critic=self.train_ensemble_with_target)
+        inp = th.cat([state, actions_pi], dim=-1)
+        if use_target:
+            target_actions_pi, _ = self.actor_target.action_log_prob(obs.detach())
+            target_inp = th.cat([state, target_actions_pi], dim=-1)
+            total_inp = th.cat([inp, target_inp], dim=0)
+        else:
+            total_inp = inp
+
+        total_inp = self.input_normalizer.normalize(total_inp)
+        dynamics_entropy = self.get_intrinsic_reward(
+            inp=total_inp,
+            labels=None,
+        ).reshape(-1, 1)
+        if detach:
+            dynamics_entropy = dynamics_entropy.detach()
+        return dynamics_entropy, log_probs.reshape(-1, 1), actions_pi, state
 
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         # Switch to train mode (this affects batch norm / dropout)
@@ -256,17 +278,19 @@ class MaxEntDrQ(DrQ):
                       ]
         if self.ent_coef_optimizer is not None:
             optimizers += [self.ent_coef_optimizer]
+        if self.dyn_ent_scale_optimizer is not None:
+            optimizers += [self.dyn_ent_scale_optimizer]
         # if self.target_encoder_optimizer is not None:
         #    optimizers += [self.target_encoder_optimizer]
         # Update learning rate according to lr schedule
         self._update_learning_rate(optimizers)
         self._update_encoder_learning_rate()
-        dyn_ent_weight = self.get_dynamics_entropy_weight()
 
         ent_coef_losses, ent_coefs = [], []
-        actor_losses, critic_losses = [], []
+        dynamics_entropies, target_entropies = [], []
+        dyn_scales, dyn_scale_losses = [], []
 
-        dynamics_info_gain, target_info_gain = [], []
+        actor_losses, critic_losses = [], []
 
         ensemble_losses = collections.defaultdict(list)
         # rc_loss_list = collections.defaultdict(list)
@@ -282,37 +306,25 @@ class MaxEntDrQ(DrQ):
             # We need to sample because `log_std` may have changed between two gradient steps
             if self.use_sde:
                 self.actor.reset_noise()
+                self.actor_target.reset_noise()
 
             # Action by the current actor for the sampled state
             # detach latent state
-            actions_pi, log_prob = self.actor.action_log_prob(obs.detach())
-            log_prob = log_prob.reshape(-1, 1)
-
-            state = self._get_state_from_embedded_obs(obs.detach(),
-                                                      use_target_critic=self.train_ensemble_with_target)
-
-            inp = th.cat([state, actions_pi], dim=-1)
-            # normalize inputs when gradient step == normalization_index which is randomly sampled.
-            # if gradient_step == normalization_index:
-            #    self.input_normalizer.update(inp)
-            inp = self.input_normalizer.normalize(inp)
-            dynamics_entropy = self.get_intrinsic_reward(
-                inp=inp,
-                labels=None,
-            ).reshape(-1, 1)
-            batch_entropy = dynamics_entropy.mean()
-            dynamics_info_gain.append(batch_entropy.item())
-            batch_entropy = batch_entropy * dyn_ent_weight
-            target_info_gain.append(self.target_info_gain.item())
-            total_entropy = -log_prob + dynamics_entropy * dyn_ent_weight
+            dynamics_entropy, log_prob, actions_pi, state = self.get_actor_and_target_entropy(
+                obs=obs, detach=False, use_target=True)
+            self.dyn_entropy_normalizer.update(dynamics_entropy.detach())
+            dynamics_entropy = self.dyn_entropy_normalizer.normalize(dynamics_entropy)
+            dynamics_entropy, target_dynamics_entropy = dynamics_entropy[:batch_size], \
+                dynamics_entropy[batch_size:]
+            dynamics_entropies.append(dynamics_entropy.mean().detach().item())
+            target_entropies.append(target_dynamics_entropy.mean().item())
             ent_coef_loss = None
             if self.ent_coef_optimizer is not None and self.log_ent_coef is not None:
                 # Important: detach the variable from the graph
                 # so we don't change it with other losses
                 # see https://github.com/rail-berkeley/softlearning/issues/60
                 ent_coef = th.exp(self.log_ent_coef.detach())
-                ent_coef_loss = -(self.log_ent_coef * (-total_entropy +
-                                                       self.target_info_gain + self.target_entropy).detach()).mean()
+                ent_coef_loss = -(self.log_ent_coef * (log_prob + self.target_entropy).detach()).mean()
                 ent_coef_losses.append(ent_coef_loss.item())
             else:
                 ent_coef = self.ent_coef_tensor
@@ -326,25 +338,35 @@ class MaxEntDrQ(DrQ):
                 ent_coef_loss.backward()
                 self.ent_coef_optimizer.step()
 
+            if self.dyn_ent_scale_optimizer is not None and self.log_dyn_entropy_scale is not None:
+                dyn_scale = th.exp(self.log_dyn_entropy_scale.detach())
+                dyn_scale_loss = (self.log_dyn_entropy_scale * (
+                        dynamics_entropy - target_dynamics_entropy).detach()).mean()
+                dyn_scale_losses.append(dyn_scale_loss.item())
+                self.dyn_ent_scale_optimizer.zero_grad()
+                dyn_scale_loss.backward()
+                self.dyn_ent_scale_optimizer.step()
+            else:
+                dyn_scale = self.dyn_entropy_scale
+
+            dyn_scales.append(dyn_scale.item())
+
             with th.no_grad():
                 # get next latent state from target encoder
                 # Select action according to policy
-                next_actions, next_log_prob = self.actor.action_log_prob(next_obs)
+                next_dyn_entropy, next_log_prob, next_actions, next_state = self.get_actor_and_target_entropy(
+                    obs=next_obs,
+                    detach=True,
+                    use_target=False)
+                next_dyn_entropy = self.dyn_entropy_normalizer.normalize(dynamics_entropy)
                 # Compute the next Q values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(next_obs, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
                 # add entropy term
-                next_state = self._get_state_from_embedded_obs(next_obs,
-                                                               use_target_critic=self.train_ensemble_with_target)
-                inp = th.cat([next_state, next_actions], dim=-1)
-                inp = self.input_normalizer.normalize(inp)
-                next_obs_dynamics_entropy = self.get_intrinsic_reward(
-                    inp=inp,
-                    labels=None,
-                ).reshape(-1, 1)
 
-                next_q_values = next_q_values - ent_coef * (-next_obs_dynamics_entropy * dyn_ent_weight
-                                                            + next_log_prob.reshape(-1, 1))
+                total_entropy = next_dyn_entropy * dyn_scale - next_log_prob * ent_coef
+
+                next_q_values = next_q_values + total_entropy
                 # td error + entropy term
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
@@ -368,8 +390,12 @@ class MaxEntDrQ(DrQ):
             # Alternative: actor_loss = th.mean(log_prob - qf1_pi)
             # Min over all critic networks
             q_values_pi = th.cat(self.critic(obs.detach(), actions_pi), dim=1)
-            min_qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
-            actor_loss = (-ent_coef * total_entropy - min_qf_pi).mean()
+            if self.use_optimism:
+                qf_pi, _ = th.max(q_values_pi, dim=1, keepdim=True)
+            else:
+                qf_pi, _ = th.min(q_values_pi, dim=1, keepdim=True)
+            total_entropy = dyn_scale * dynamics_entropy - ent_coef * log_prob
+            actor_loss = -(total_entropy + qf_pi).mean()
             actor_losses.append(actor_loss.item())
 
             # Optimize the actor
@@ -379,11 +405,10 @@ class MaxEntDrQ(DrQ):
 
             # Update target networks
             if gradient_step % self.target_update_interval == 0:
+                polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
                 # Copy running stats, see GH issue #996
                 polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
-                self.target_info_gain = (1 - self.target_info_tau) * self.target_info_gain + \
-                                        self.target_info_tau * batch_entropy.detach()
 
             # ensemble training
             inp = th.cat([state, replay_data.actions], dim=-1)
@@ -416,8 +441,15 @@ class MaxEntDrQ(DrQ):
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
+        if len(ent_coef_losses) > 0:
+            self.logger.record("train/dyn_scale_loss", np.mean(ent_coef_losses))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        if len(dyn_scale_losses) > 0:
+            self.logger.record("train/dyn_scale_loss", np.mean(dyn_scale_losses))
+        if len(dynamics_entropies) > 0:
+            self.logger.record("train/dynamics_entropy", np.mean(dynamics_entropies))
+            self.logger.record("train/target_entropy", np.mean(target_entropies))
         for key, val in ensemble_losses.items():
             self.logger.record(f"train/ensemble_loss_{key}", np.mean(val))
             self.logger.record(f"train/out_normalizer_mean_{key}", np.mean(
@@ -426,8 +458,8 @@ class MaxEntDrQ(DrQ):
                 self.output_normalizers[key].std.cpu().numpy()))
         self.logger.record(f"train/inp_normalizer_mean", np.mean(self.input_normalizer.mean.cpu().numpy()))
         self.logger.record(f"train/inp_normalizer_std", np.mean(self.input_normalizer.std.cpu().numpy()))
-        self.logger.record("train/dynamics_info_gain", np.mean(dynamics_info_gain))
-        self.logger.record("train/target_info_gain", np.mean(target_info_gain))
+        self.logger.record("train/dynamics_entropy_mean", np.mean(self.dyn_entropy_normalizer.mean.cpu().numpy()))
+        self.logger.record("train/dynamics_entropy_std", np.mean(self.dyn_entropy_normalizer.std.cpu().numpy()))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
@@ -491,7 +523,7 @@ if __name__ == '__main__':
 
     ensemble_model_kwargs = {
         'learn_std': False,
-        'optimizer_kwargs': {'lr': 3e-4, 'weight_decay': 1e-4}
+        'optimizer_kwargs': {'lr': 1e-4, 'weight_decay': 0.0}
     }
     algorithm = MaxEntDrQ(
         ensemble_model_kwargs=ensemble_model_kwargs,
