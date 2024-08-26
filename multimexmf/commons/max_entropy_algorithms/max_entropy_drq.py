@@ -30,7 +30,6 @@ class MaxEntDrQ(DrQ):
                  ens_obs_representation: str = 'full',
                  predict_state: bool = True,
                  predict_reward: bool = True,
-                 update_encoder_with_exploration_critic: bool = True,
                  train_ensemble_with_target: bool = True,
                  img_obs_pooling_params: Optional[dict] = None,
                  tactile_obs_pooling_params: Optional[dict] = None,
@@ -54,7 +53,6 @@ class MaxEntDrQ(DrQ):
         self.img_obs_pooling_params = img_obs_pooling_params
         self.tactile_obs_pooling_params = tactile_obs_pooling_params
         self.use_optimism = use_optimism
-        self.update_encoder_with_exploration_critic = update_encoder_with_exploration_critic
         # self.obs_encoder_num_layers = obs_encoder_num_layers
         self._setup_ensemble_model(
             ensemble_model_kwargs=ensemble_model_kwargs,
@@ -247,14 +245,15 @@ class MaxEntDrQ(DrQ):
         else:
             return entropy
 
-    def get_actor_and_target_entropy(self, obs, detach: bool = False, use_target: bool = False):
+    def get_actor_entropies(self, obs, detach: bool = False, use_target: bool = False):
         obs = obs.detach()
         actions_pi, log_probs = self.actor.action_log_prob(obs)
 
         state = self._get_state_from_embedded_obs(obs, use_target_critic=self.train_ensemble_with_target)
         inp = th.cat([state, actions_pi], dim=-1)
         if use_target:
-            target_actions_pi, _ = self.actor_target.action_log_prob(obs.detach())
+            target_actions_pi, _ = self.actor_target.action_log_prob(obs)
+            target_actions_pi = target_actions_pi.detach()
             target_inp = th.cat([state, target_actions_pi], dim=-1)
             total_inp = th.cat([inp, target_inp], dim=0)
         else:
@@ -310,7 +309,7 @@ class MaxEntDrQ(DrQ):
 
             # Action by the current actor for the sampled state
             # detach latent state
-            dynamics_entropy, log_prob, actions_pi, state = self.get_actor_and_target_entropy(
+            dynamics_entropy, log_prob, actions_pi, state = self.get_actor_entropies(
                 obs=obs, detach=False, use_target=True)
             self.dyn_entropy_normalizer.update(dynamics_entropy.detach())
             dynamics_entropy = self.dyn_entropy_normalizer.normalize(dynamics_entropy)
@@ -354,7 +353,7 @@ class MaxEntDrQ(DrQ):
             with th.no_grad():
                 # get next latent state from target encoder
                 # Select action according to policy
-                next_dyn_entropy, next_log_prob, next_actions, next_state = self.get_actor_and_target_entropy(
+                next_dyn_entropy, next_log_prob, next_actions, next_state = self.get_actor_entropies(
                     obs=next_obs,
                     detach=True,
                     use_target=False)
