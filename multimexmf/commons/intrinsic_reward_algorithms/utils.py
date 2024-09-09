@@ -90,6 +90,7 @@ def explore_till(
             return 1.0
         else:
             return 0.0
+
     return exploration_weight
 
 
@@ -112,7 +113,27 @@ def exploration_frequency_schedule(
             else:
                 return current_freq
         return current_freq
+
     return exploration_freq
 
 
+def random_exploration_schedule(eps_init: float = 1.0, eps_final: float = 0.001,
+                                exploration_fraction: float = 0.0,
+                                seed: int = 0,
+                                ):
+    assert exploration_fraction < 1.0
+    assert exploration_fraction >= 0.0
+    np.random.seed(seed=seed)
 
+    # example: thressholds = [[1 1], [0.75, 2], [0.5, 5], [0.25, 100]]
+    def exploration_freq(progress: float):
+        # progress starts at 1 and goes to 0.
+        eps = (eps_init - eps_final) * (progress - exploration_fraction) / (1 - exploration_fraction) + eps_final
+        u = np.random.uniform(low=0, high=1)
+        explore = u <= eps
+        if explore:
+            return 1
+        else:
+            return -1
+
+    return exploration_freq
