@@ -98,6 +98,7 @@ class MaxRNDSAC(SAC):
             output_dict=output_dict,
             use_entropy=False,
             num_heads=1,
+            act_fn=torch.nn.SiLU(),
             **ensemble_model_kwargs,
         )
         self.target_model.to(device)
@@ -136,7 +137,8 @@ class MaxRNDSAC(SAC):
 
     def _get_ensemble_targets(self, inp: torch.Tensor) -> Dict:
         out = self.target_model(inp)
-        out = {k: v.reshape(-1, self.embedding_dim) for k, v in out.items()}
+        # put the output between -1 and 1 for normalizing
+        out = {k: F.tanh(v.reshape(-1, self.embedding_dim)) for k, v in out.items()}
         return out
 
     def get_intrinsic_reward(self, inp: th.Tensor) -> th.Tensor:
