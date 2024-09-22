@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch as th
 import torch.nn as nn
@@ -305,10 +306,10 @@ class EnsembleMLP(nn.Module):
         return disagreement
 
 
-def dropout_weights_init_(m):
+def dropout_weights_init_(m, gain: float = 1.0):
     # weight init helper function
     if isinstance(m, nn.Linear):
-        torch.nn.init.xavier_uniform_(m.weight, gain=1)
+        torch.nn.init.xavier_uniform_(m.weight, gain=gain)
         torch.nn.init.constant_(m.bias, 0)
 
 
@@ -456,10 +457,12 @@ if __name__ == '__main__':
     train_loader = DataLoader(TensorDataset(xs, ys), shuffle=True, batch_size=32)
     model = EnsembleMLP(input_dim=1, output_dict={'y1': ys[..., 0].reshape(-1, 1),
                                                   'y2': ys[..., -1].reshape(-1, 1)}, features=(256, 256),
-                        optimizer_kwargs={'lr': 1e-3, 'weight_decay': 1e-4}, num_heads=5,
+                        optimizer_kwargs={'lr': 1e-3, 'weight_decay': 0.0}, num_heads=1,
                         learn_std=learn_std)
 
-    n_epochs = 1_000
+    model.apply(lambda m: dropout_weights_init_(m, gain=np.sqrt(2)))
+
+    n_epochs = 0
     n_steps = 0
     for i in range(n_epochs):
         for X_batch, Y_batch in train_loader:
