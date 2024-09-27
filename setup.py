@@ -4,9 +4,10 @@ from setuptools import setup, find_packages
 
 required = [
     # 'M3L @ git+https://github.com/sukhijab/M3L.git',
-    'dm_control',
+    #'dm_control',
+    'stable-baselines3[extra]'
     # 'minitouch @ git+https://github.com/sukhijab/MiniTouch.git',
-    'tactile_envs @ git+https://github.com/sukhijab/tactile_envs.git',
+    # 'tactile_envs @ git+https://github.com/sukhijab/tactile_envs.git',
 ]
 
 extras = {}
