@@ -262,7 +262,7 @@ if __name__ == '__main__':
     parser.add_argument('--confname', type=str, default='sac.yaml')
     args = parser.parse_args()
     import yaml
-    with open(f'experiments/confs/{args.confname}', 'r') as f:
+    with open(f'{args.confname}', 'r') as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
     config = recursive_objectify(config, make_immutable=False)
