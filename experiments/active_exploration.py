@@ -143,6 +143,7 @@ def experiment(
         monitor_gym=True,  # auto-upload the videos of agents playing the game
         save_code=True,  # optional
         config=conf,
+        group=conf.experiment_name,
     )
 
     # vec_env = make_vec_env('MountainCarContinuous-v0', n_envs=train.num_envs, seed=seed, wrapper_class=TimeLimit,
