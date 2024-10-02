@@ -1,18 +1,19 @@
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import EvalCallback
-from stable_baselines3.sac import SAC
 from gymnasium.wrappers.time_limit import TimeLimit
-from multimexmf.commons.utils import HERGoalEnvWrapper
+from multimexmf.commons.utils.wrappers import HERGoalEnvWrapper
 import wandb
 from wandb.integration.sb3 import WandbCallback
-from multimexmf.commons.intrinsic_reward_algorithms.sac_exploit_and_play import SacExploitAndPlay
-from multimexmf.commons.intrinsic_reward_algorithms.utils import exploration_frequency_schedule, \
-    DisagreementIntrinsicReward, CuriosityIntrinsicReward
+from gymnasium.wrappers import NormalizeObservation
+
+from multimexmf.commons.intrinsic_reward_algorithms.sac_exploit_and_play \
+    import SacExploitAndPlay
+from multimexmf.commons.intrinsic_reward_algorithms.utils import\
+    exploration_frequency_schedule, DisagreementIntrinsicReward
 import numpy as np
+import datetime
 import os
-import sys
 import argparse
-from experiments.utils import Logger, hash_dict
+from multimexmf.commons.utils.dict_utils import recursive_objectify
 import mbrl.env.mujoco_envs
 
 from typing import Any, Callable, Dict, Optional, Type, Union
@@ -22,6 +23,8 @@ import gymnasium as gym
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
 from stable_baselines3.common.vec_env.patch_gym import _patch_env
+from stable_baselines3.common.vec_env.vec_video_recorder import \
+    VecVideoRecorder
 
 
 def make_vec_env(
@@ -93,7 +96,8 @@ def make_vec_env(
                 env.action_space.seed(seed + rank)
             # Wrap the env in a Monitor wrapper
             # to have additional training information
-            monitor_path = os.path.join(monitor_dir, str(rank)) if monitor_dir is not None else None
+            monitor_path = os.path.join(monitor_dir, str(
+                rank)) if monitor_dir is not None else None
             # Create the monitor folder if needed
             if monitor_path is not None and monitor_dir is not None:
                 os.makedirs(monitor_dir, exist_ok=True)
@@ -112,49 +116,36 @@ def make_vec_env(
         # Default: use a DummyVecEnv
         vec_env_cls = DummyVecEnv
 
-    vec_env = vec_env_cls([make_env(i + start_index) for i in range(n_envs)], **vec_env_kwargs)
+    vec_env = vec_env_cls([make_env(i + start_index)
+                          for i in range(n_envs)], **vec_env_kwargs)
     # Prepare the seeds for the first reset
     vec_env.seed(seed)
     return vec_env
 
-def experiment(
-        alg: str = 'Disagreement',
-        logs_dir: str = './logs/',
-        project_name: str = 'MCTest',
-        total_steps: int = 25_000,
-        ensemble_type: str = 'MlpEns',
-        num_envs: int = 8,
-        ensemble_lr: float = 1e-3,
-        ensemble_wd: float = 1e-4,
-        exploitation_switch: float = 0.0,
-        seed: int = 0,
-):
-    # exploitation switch has to be between [0, 1]
-    assert exploitation_switch >= 0 and exploitation_switch <= 1
-    # from multimexmf.envs.dm2gym import DMCGym
-    tb_dir = logs_dir + 'runs'
 
-    config = dict(
-        alg=alg,
-        total_steps=total_steps,
-        num_envs=num_envs,
-        ensemble_lr=ensemble_lr,
-        ensemble_wd=ensemble_wd,
-        exploitation_switch_at=exploitation_switch,
-        ensemble_type=ensemble_type,
-    )
+def experiment(
+    conf
+):
+    time_string = datetime.datetime.now().strftime("%m_%d_%H%M%S")
+    conf.logs_dir = os.path.join(
+        conf.logs_dir, conf.experiment_name, time_string)
+    # exploitation switch has to be between [0, 1]
+    assert conf.train.exploitation_switch >= 0 and \
+        conf.train.exploitation_switch <= 1
+    # from multimexmf.envs.dm2gym import DMCGym
+    tb_dir = conf.logs_dir + '/runs'
 
     # wandb.tensorboard.patch(root_logdir=tb_dir)
     run = wandb.init(
-        dir=logs_dir,
-        project=project_name,
+        dir=conf.logs_dir,
+        project=conf.project_name,
         sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
         monitor_gym=True,  # auto-upload the videos of agents playing the game
         save_code=True,  # optional
-        config=config,
+        config=conf,
     )
 
-    # vec_env = make_vec_env('MountainCarContinuous-v0', n_envs=num_envs, seed=seed, wrapper_class=TimeLimit,
+    # vec_env = make_vec_env('MountainCarContinuous-v0', n_envs=train.num_envs, seed=seed, wrapper_class=TimeLimit,
     #                        env_kwargs={'render_mode': 'rgb_array'},
     #                        wrapper_kwargs={'max_episode_steps': 1_000})
     # eval_env = make_vec_env('MountainCarContinuous-v0', n_envs=4, seed=seed + 1000,
@@ -163,21 +154,45 @@ def experiment(
     #                         wrapper_kwargs={'max_episode_steps': 1_000}
     #                         )
 
-    vec_env = make_vec_env(mbrl.env.mujoco_envs.MujocoFetchReachEnv, n_envs=num_envs, seed=seed, wrapper_class=[TimeLimit, HERGoalEnvWrapper],
-                           env_kwargs={'render_mode': 'rgb_array'},
-                           wrapper_kwargs=[{'max_episode_steps': 100}, {}])
-    
-    eval_env = make_vec_env(mbrl.env.mujoco_envs.MujocoFetchReachEnv,  seed=seed + 1000,
-                            env_kwargs={'render_mode': 'rgb_array'},
-                            wrapper_class=[TimeLimit, HERGoalEnvWrapper],
-                            wrapper_kwargs=[{'max_episode_steps': 100}, {}]
-                            )
+    # vec_env = make_vec_env(mbrl.env.mujoco_envs.MujocoFetchReachEnv,
+    #                        n_envs=conf.train.num_envs, seed=conf.seed,
+    #                        wrapper_class=[TimeLimit, HERGoalEnvWrapper],
+    #                        env_kwargs={'render_mode': 'rgb_array'},
+    #                        wrapper_kwargs=[{'max_episode_steps': conf.env.trial_length}, {}])
 
+    # eval_env = make_vec_env(mbrl.env.mujoco_envs.MujocoFetchReachEnv,
+    #                         seed=conf.seed + 1000,
+    #                         env_kwargs={'render_mode': 'rgb_array'},
+    #                         wrapper_class=[TimeLimit, HERGoalEnvWrapper],
+    #                         wrapper_kwargs=[
+    #                             {'max_episode_steps': conf.env.trial_length}, {}]
+    #                         )
+
+    vec_env = make_vec_env(mbrl.env.mujoco_envs.DisMujocoFppEnv,
+                           n_envs=conf.train.num_envs, seed=conf.seed,
+                           wrapper_class=[
+                               TimeLimit, HERGoalEnvWrapper, NormalizeObservation],
+                           env_kwargs={'render_mode': 'rgb_array', 'num_objects': conf.env.num_objects,
+                                       'same_col': conf.env.same_col, 'num_cols': conf.env.num_goals, 'fix_goal': conf.env.fix_goal},
+                           wrapper_kwargs=[{'max_episode_steps': conf.env.trial_length}, {}])
+
+    eval_env = make_vec_env(mbrl.env.mujoco_envs.DisMujocoFppEnv,
+                            seed=conf.seed + 1000,
+                            wrapper_class=[
+                                TimeLimit, HERGoalEnvWrapper, NormalizeObservation],
+                            env_kwargs={'render_mode': 'rgb_array', 'num_objects': conf.env.num_objects,
+                                        'same_col': conf.env.same_col, 'num_cols': conf.env.num_goals, 'fix_goal': conf.env.fix_goal},
+                            wrapper_kwargs=[{'max_episode_steps': conf.env.trial_length}, {}])
+
+    eval_env = VecVideoRecorder(venv=eval_env,
+                                video_folder=conf.logs_dir + '/videos',
+                                record_video_trigger=lambda x: conf.save_video,
+                                video_length=conf.env.trial_length-1)
     callback = EvalCallback(eval_env,
-                            log_path=logs_dir,
-                            best_model_save_path=logs_dir,
+                            log_path=conf.logs_dir,
+                            best_model_save_path=conf.logs_dir,
                             eval_freq=1_000,
-                            n_eval_episodes=5,
+                            n_eval_episodes=conf.train.num_exploit_trials,
                             deterministic=True,
                             render=False,
                             verbose=2)
@@ -190,30 +205,27 @@ def experiment(
         'verbose': 1,
         'tensorboard_log': f"{tb_dir}/{run.id}",
         'gradient_steps': -1,
-        'learning_starts': 500 * num_envs,
+        'learning_starts': 500 * conf.train.num_envs,
     }
 
     ensemble_model_kwargs = {
         'learn_std': False,
-        'optimizer_kwargs': {'lr': ensemble_lr, 'weight_decay': ensemble_wd},
+        'optimizer_kwargs': {'lr': conf.train.ensemble_lr,
+                             'weight_decay': conf.train.ensemble_wd},
+        'features': tuple(conf.arch.n_layers * [conf.arch.n_units]),
+
     }
 
-    if ensemble_type == 'MlpEns':
+    if conf.arch.ensemble_type == 'MlpEns':
         from multimexmf.models.pretrain_models import EnsembleMLP
-        ensemble_type = EnsembleMLP
-    elif ensemble_type == 'MultiheadEns':
-        from multimexmf.models.pretrain_models import MultiHeadGaussianEnsemble
-        ensemble_type = MultiHeadGaussianEnsemble
-    elif ensemble_type == 'DropoutEnsemble':
-        from multimexmf.models.pretrain_models import DropoutEnsemble
-        ensemble_type = DropoutEnsemble
+        conf.arch.ensemble_type = EnsembleMLP
     else:
         raise NotImplementedError
 
     # exploitation switch says after how many steps do you switch to maximizing extrinsic reward.
     # if exploitation switch = 0.75 --> first 25 % of the total steps you maximize intrinsic reward and extrinsic thereafter.
-    if alg == 'Disagreement':
-        exploration_freq = [[1, 1], [exploitation_switch, -1]]
+    if conf.alg == 'Disagreement':
+        exploration_freq = [[1, 1], [conf.train.exploitation_switch, -1]]
         algorithm = SacExploitAndPlay(
             env=vec_env,
             ensemble_model_kwargs=ensemble_model_kwargs,
@@ -223,22 +235,11 @@ def experiment(
             ),
             **algorithm_kwargs
         )
-    elif alg == 'Curiosity':
-        exploration_freq = [[1, 1], [exploitation_switch, -1]]
-        algorithm = SacExploitAndPlay(
-            env=vec_env,
-            ensemble_model_kwargs=ensemble_model_kwargs,
-            intrinsic_reward_model=CuriosityIntrinsicReward,
-            exploration_freq=exploration_frequency_schedule(
-                exploration_freq
-            ),
-            **algorithm_kwargs
-        )
     else:
         raise NotImplementedError
 
     algorithm.learn(
-        total_timesteps=total_steps,
+        total_timesteps=conf.train.num_steps,
         callback=[WandbCallback(), callback],
     )
 
@@ -247,51 +248,22 @@ def main(args):
     """"""
     from pprint import pprint
     print(args)
-    """ generate experiment hash and set up redirect of output streams """
-    exp_hash = hash_dict(args.__dict__)
-    if args.exp_result_folder is not None:
-        os.makedirs(args.exp_result_folder, exist_ok=True)
-        log_file_path = os.path.join(args.exp_result_folder, '%s.log ' % exp_hash)
-        logger = Logger(log_file_path)
-        sys.stdout = logger
-        sys.stderr = logger
-
     pprint(args.__dict__)
     print('\n ------------------------------------ \n')
 
     """ Experiment core """
     np.random.seed(args.seed)
 
-    experiment(
-        logs_dir=args.logs_dir,
-        project_name=args.project_name,
-        alg=args.alg,
-        total_steps=args.total_steps,
-        num_envs=args.num_envs,
-        ensemble_lr=args.ensemble_lr,
-        ensemble_wd=args.ensemble_wd,
-        exploitation_switch=args.exploitation_switch,
-        ensemble_type=args.ensemble_type,
-        seed=args.seed,
-    )
+    experiment(args)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MTTest')
-
-    # general experiment args
-    parser.add_argument('--logs_dir', type=str, default='./logs/')
-    parser.add_argument('--project_name', type=str, default='test_reach')
-    parser.add_argument('--alg', type=str, default='Disagreement')
-    parser.add_argument('--total_steps', type=int, default=250_000)
-    parser.add_argument('--num_envs', type=int, default=8)
-    parser.add_argument('--ensemble_lr', type=float, default=3e-4)
-    parser.add_argument('--ensemble_wd', type=float, default=0.0)
-    parser.add_argument('--exploitation_switch', type=float, default=0.5)
-    parser.add_argument('--ensemble_type', type=str, default='MlpEns')
-    parser.add_argument('--seed', type=int, default=0)
-
-    parser.add_argument('--exp_result_folder', type=str, default=None)
-
+    parser.add_argument('--confname', type=str, default='sac.yaml')
     args = parser.parse_args()
-    main(args)
+    import yaml
+    with open(f'experiments/confs/{args.confname}', 'r') as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+
+    config = recursive_objectify(config, make_immutable=False)
+    main(config)

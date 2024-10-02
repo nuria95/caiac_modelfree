@@ -1,0 +1,36 @@
+# @package _group_
+project_name: "caiac_model_free"
+experiment_name: "test_sac"
+logs_dir: "./logs"
+alg: "Disagreement"
+save_video: False
+seed: 2
+
+train:
+  num_exploit_trials: 5
+  exploitation_switch: 0.0 #not used for now
+  num_steps: 2000000
+  dataset_size: 1000000
+  num_envs: 8
+  ensemble_lr: 3.e-4
+  ensemble_wd: 0.0
+  deterministic: true
+
+
+env:
+  name: "DisMujocoFpp"
+  num_objects: 2
+  trial_length: 100
+  same_col: true
+  fix_goal: true
+  num_goals: 1
+  offset_r_gripper: 0.01
+  w_gripper_obj: 0.5
+  w_gripper_close: 0.1
+
+arch:
+  ensemble_type: "MlpEns"
+  n_layers: 3
+  n_units: 256
+
+

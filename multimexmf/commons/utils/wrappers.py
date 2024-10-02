@@ -105,7 +105,7 @@ class HERGoalEnvWrapper(gym.Wrapper):
         return self.env.compute_rdefeward(achieved_goal, desired_goal, info)
 
     def render(self, mode='human'):
-        return self.env.render(mode)
+        return self.env.render()
 
     def close(self):
         return self.env.close()
