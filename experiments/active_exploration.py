@@ -198,11 +198,11 @@ def experiment(
                                 {'max_episode_steps': conf.env.trial_length},
                                 {}
                             ])
-
-    eval_env = VecVideoRecorder(venv=eval_env,
-                                video_folder=conf.logs_dir + '/videos',
-                                record_video_trigger=lambda x: conf.save_video,
-                                video_length=conf.env.trial_length-1)
+    if conf.save_video:
+        eval_env = VecVideoRecorder(venv=eval_env,
+                                    video_folder=conf.logs_dir + '/videos',
+                                    record_video_trigger=lambda x: conf.save_video,
+                                    video_length=conf.env.trial_length-1)
     callback = EvalCallback(eval_env,
                             log_path=conf.logs_dir,
                             best_model_save_path=conf.logs_dir,
