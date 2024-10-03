@@ -221,6 +221,7 @@ def experiment(
         'tensorboard_log': f"{tb_dir}/{run.id}",
         'gradient_steps': -1,
         'learning_starts': 500 * conf.train.num_envs,
+        'ent_coef': conf.train.ent_coef
     }
 
     ensemble_model_kwargs = {

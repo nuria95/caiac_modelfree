@@ -1,6 +1,6 @@
 # @package _group_
 project_name: "caiac_model_free"
-experiment_name: "test_sac"
+experiment_name: "fixed_entropy_coef"
 logs_dir: "./logs"
 alg: "Disagreement"
 save_video: False
@@ -15,6 +15,7 @@ train:
   ensemble_lr: 3.e-4
   ensemble_wd: 0.0
   deterministic: true
+  ent_coef: 0.1 # 'auto' for automatic entropy adjustment'
 
 
 env:
