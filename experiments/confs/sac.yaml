@@ -15,7 +15,7 @@ train:
   ensemble_lr: 3.e-4
   ensemble_wd: 0.0
   deterministic: true
-  ent_coef: 0.1 # 'auto' for automatic entropy adjustment'
+  ent_coef: "auto" #for automatic entropy adjustment'
 
 
 env:
