@@ -126,9 +126,6 @@ def make_vec_env(
 def experiment(
     conf
 ):
-    time_string = datetime.datetime.now().strftime("%m_%d_%H%M%S")
-    conf.logs_dir = os.path.join(
-        conf.logs_dir, conf.experiment_name, time_string)
     # exploitation switch has to be between [0, 1]
     assert conf.train.exploitation_switch >= 0 and \
         conf.train.exploitation_switch <= 1
@@ -170,20 +167,37 @@ def experiment(
     #                         )
 
     vec_env = make_vec_env(mbrl.env.mujoco_envs.DisMujocoFppEnv,
-                           n_envs=conf.train.num_envs, seed=conf.seed,
+                           n_envs=conf.train.num_envs,
+                           seed=conf.seed,
                            wrapper_class=[
-                               TimeLimit, HERGoalEnvWrapper, NormalizeObservation],
-                           env_kwargs={'render_mode': 'rgb_array', 'num_objects': conf.env.num_objects,
-                                       'same_col': conf.env.same_col, 'num_cols': conf.env.num_goals, 'fix_goal': conf.env.fix_goal},
-                           wrapper_kwargs=[{'max_episode_steps': conf.env.trial_length}, {}])
+                               TimeLimit,
+                               HERGoalEnvWrapper,
+                               NormalizeObservation],
+                           env_kwargs={'render_mode': 'rgb_array',
+                                       'num_objects': conf.env.num_objects,
+                                       'same_col': conf.env.same_col,
+                                       'num_cols': conf.env.num_goals,
+                                       'fix_goal': conf.env.fix_goal},
+                           wrapper_kwargs=[
+                               {'max_episode_steps': conf.env.trial_length},
+                               {}
+                           ])
 
     eval_env = make_vec_env(mbrl.env.mujoco_envs.DisMujocoFppEnv,
                             seed=conf.seed + 1000,
                             wrapper_class=[
-                                TimeLimit, HERGoalEnvWrapper, NormalizeObservation],
-                            env_kwargs={'render_mode': 'rgb_array', 'num_objects': conf.env.num_objects,
-                                        'same_col': conf.env.same_col, 'num_cols': conf.env.num_goals, 'fix_goal': conf.env.fix_goal},
-                            wrapper_kwargs=[{'max_episode_steps': conf.env.trial_length}, {}])
+                                TimeLimit,
+                                HERGoalEnvWrapper,
+                                NormalizeObservation],
+                            env_kwargs={'render_mode': 'rgb_array',
+                                        'num_objects': conf.env.num_objects,
+                                        'same_col': conf.env.same_col,
+                                        'num_cols': conf.env.num_goals,
+                                        'fix_goal': conf.env.fix_goal},
+                            wrapper_kwargs=[
+                                {'max_episode_steps': conf.env.trial_length},
+                                {}
+                            ])
 
     eval_env = VecVideoRecorder(venv=eval_env,
                                 video_folder=conf.logs_dir + '/videos',
@@ -223,8 +237,10 @@ def experiment(
     else:
         raise NotImplementedError
 
-    # exploitation switch says after how many steps do you switch to maximizing extrinsic reward.
-    # if exploitation switch = 0.75 --> first 25 % of the total steps you maximize intrinsic reward and extrinsic thereafter.
+    # exploitation switch says after how many steps do you switch to
+    # maximizing extrinsic reward.
+    # if exploitation switch = 0.75 --> first 25 % of the total steps you
+    # maximize intrinsic reward and extrinsic thereafter.
     if conf.alg == 'Disagreement':
         exploration_freq = [[1, 1], [conf.train.exploitation_switch, -1]]
         algorithm = SacExploitAndPlay(
@@ -267,4 +283,12 @@ if __name__ == '__main__':
         config = yaml.load(f, Loader=yaml.FullLoader)
 
     config = recursive_objectify(config, make_immutable=False)
+    # If in cluster, use working_dir results_clus/experiment_name/id
+    if 'working_dir' in config:
+        config.logs_dir = config.working_dir
+    else:  # use logs/experiment_name/datetime
+        time_string = datetime.datetime.now().strftime("%m_%d_%H%M%S")
+        config.logs_dir = os.path.join(
+            config.logs_dir, config.experiment_name, time_string)
+    os.makedirs(config.logs_dir, exist_ok=True)
     main(config)
