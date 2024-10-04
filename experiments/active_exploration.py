@@ -216,7 +216,7 @@ def experiment(
         'policy': 'MlpPolicy',
         # 'train_freq': 32,
         # 'gradient_steps': 32,
-        # 'learning_rate': 1e-3,
+        'learning_rate': conf.train.policy_lr,
         'verbose': 1,
         'tensorboard_log': f"{tb_dir}/{run.id}",
         'gradient_steps': -1,
